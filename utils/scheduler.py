@@ -143,6 +143,12 @@ class OneCycleLR(lr_scheduler.OneCycleLR):
         )
 
 
+# Importing registers the paper-specific scheduler while keeping its
+# implementation in an independent file.
+from utils.glob3r_scheduler import CosineWithWarmupLR
+SCHEDULERS.register_module()(CosineWithWarmupLR)
+
+
 def build_scheduler(cfg, optimizer):
     cfg_ = OmegaConf.to_container(cfg, resolve=True)
     cfg_["optimizer"] = optimizer

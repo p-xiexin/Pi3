@@ -1,0 +1,15 @@
+defaults:
+  - glob3r_coarse
+  - _self_
+
+name: glob3r_refinement
+
+# Only the paper-specified differences from the coarse experiment are kept here.
+glob3r:
+  stage: refinement
+
+train:
+  image_num_range: [2, 24]
+  max_img_per_gpu: 24
+  optimizer:
+    lr: 5.0e-5
