@@ -54,6 +54,21 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
   glob3r.backbone_checkpoint=ckpts/Pi3/model.safetensors
 ```
 
+单卡调试训练（5 epochs × 800 iterations）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 accelerate launch \
+  --num_processes 1 \
+  scripts/train_pi3.py \
+  --config-name glob3r_test \
+  glob3r.backbone_checkpoint=ckpts/Pi3/model.safetensors \
+  scannet_root=/path/to/scannet
+```
+
+`glob3r_test.yaml` 是不继承其他 YAML 的独立调试配置，共执行 5 个 epoch、每个 epoch
+800 个 optimizer iterations，并每 100 step 写入 TensorBoard 可视化。训练和验证都只
+使用 ScanNet；每个 epoch 结束后执行验证并保存 checkpoint。
+
 Refinement 阶段加载 coarse matching checkpoint，并可导入尺寸兼容的 RoMaV2 refinement 权重：
 
 ```bash
@@ -69,7 +84,7 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
 
 ## TensorBoard
 
-默认每 500 个 optimizer steps 写入一张 `train/matching_overview` 四行网格：`Images` 显示参考帧和目标帧，`Warp` 显示目标帧按预测 warp 重采样到参考视角的结果，`Conf` 显示预测置信度，`Mask` 显示几何监督 mask。默认取 1 个样本和最多 7 个目标帧；可在 `glob3r.visualization` 中调整记录间隔、样本数、目标帧数、置信度阈值和单元格宽度。
+训练阶段每 500 个 optimizer steps 写入一张 `train/matching_overview`，验证阶段每个 epoch 取第一批写入 `val/matching_overview`。两者都是四行网格：`Images` 显示参考帧和目标帧，`Warp` 显示目标帧按预测 warp 重采样到参考视角的结果，`Conf` 显示预测置信度，`Mask` 显示几何监督 mask。默认取 1 个样本和最多 7 个目标帧；可在 `glob3r.visualization` 中调整训练记录间隔、样本数、目标帧数、置信度阈值和单元格宽度。
 
 默认日志目录是 `outputs/${name}`。在仓库根目录查看 coarse 训练日志：
 
@@ -89,4 +104,4 @@ tensorboard --logdir outputs/glob3r_refinement
 tensorboard --logdir outputs
 ```
 
-启动后在浏览器访问 `http://localhost:6006`，在 Images 面板中选择 `train/matching_overview`。
+启动后在浏览器访问 `http://localhost:6006`，在 Images 面板中选择 `train/matching_overview` 或 `val/matching_overview`。

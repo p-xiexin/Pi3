@@ -7,3 +7,20 @@ plyfile
 huggingface_hub
 safetensors
 tensorboard
+
+# Training framework
+accelerate==1.2.1
+hydra-core>=1.2,<1.4
+hydra-colorlog
+omegaconf>=2.2,<2.4
+transformers
+easydict
+PyYAML
+tqdm
+
+# Dataset and logging utilities
+scipy
+pandas
+h5py
+prettytable
+rich

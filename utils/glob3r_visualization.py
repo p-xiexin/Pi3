@@ -7,6 +7,7 @@ from typing import Mapping, Sequence
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
+from torchvision.transforms.functional import pil_to_tensor
 
 from pi3.models.glob3r.geometry import build_ground_truth_warp, sample_map_at_pixels
 
@@ -134,20 +135,32 @@ class Glob3RTensorBoardVisualizer:
         accumulation = max(int(gradient_accumulation_steps), 1)
         self.step = int(initial_global_step) // accumulation
         self.last_step = -1
+        self.validation_step = 0
+        self.validation_pending = False
+
+    def begin_validation(self, epoch: int) -> None:
+        self.validation_step = int(epoch) + 1
+        self.validation_pending = True
 
     def log(self, accelerator, output, mode: str) -> None:
-        is_optimizer_step = mode == "train" and accelerator.sync_gradients
-        if is_optimizer_step:
-            self.step += 1
+        if not bool(self.config.get("enabled", True)) or not accelerator.is_main_process:
+            return
+
         interval = int(self.config.get("interval_steps", 0))
-        if not (
-            is_optimizer_step
-            and bool(self.config.get("enabled", True))
-            and interval > 0
-            and self.step % interval == 0
-            and self.step != self.last_step
-            and accelerator.is_main_process
-        ):
+        if mode == "train":
+            if not accelerator.sync_gradients:
+                return
+            self.step += 1
+            if interval <= 0 or self.step % interval != 0 or self.step == self.last_step:
+                return
+            tag = "train/matching_overview"
+            log_step = self.step
+        elif mode == "test":
+            if not self.validation_pending:
+                return
+            tag = "val/matching_overview"
+            log_step = self.validation_step
+        else:
             return
 
         prediction, views = output
@@ -165,6 +178,10 @@ class Glob3RTensorBoardVisualizer:
             )
             for batch_index in range(min(int(self.config.get("num_samples", 1)), images.shape[0]))
         ]
+        grid_batch = torch.stack([pil_to_tensor(grid) for grid in grids])
         for tracker in accelerator.trackers:
-            tracker.log_images({"train/matching_overview": grids}, step=self.step)
-        self.last_step = self.step
+            tracker.log_images({tag: grid_batch}, step=log_step)
+        if mode == "train":
+            self.last_step = self.step
+        else:
+            self.validation_pending = False

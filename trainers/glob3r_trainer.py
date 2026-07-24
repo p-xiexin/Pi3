@@ -117,3 +117,7 @@ class Glob3RTrainer(Pi3Trainer):
         result = super().calculate_loss(output, batch, mode)
         self.visualizer.log(self.accelerator, output, mode)
         return result
+
+    def validate(self, epoch):
+        self.visualizer.begin_validation(epoch)
+        return super().validate(epoch)
