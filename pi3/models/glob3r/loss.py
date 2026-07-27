@@ -26,13 +26,13 @@ def _resize_scalar_map(value: torch.Tensor, size: Tuple[int, int], mode: str) ->
 def _resize_warp(value: torch.Tensor, size: Tuple[int, int]) -> torch.Tensor:
     """Resize ``[B,T,H,W,2]`` GT warp grids to the prediction resolution.
 
-    Warp values remain in full-image target-pixel coordinates, so intrinsics
-    are not scaled here; resize/crop-adjusted intrinsics must come from data preprocessing.
+    Nearest resizing keeps coordinates aligned with validity labels. Values stay
+    in full-image pixels, so resize/crop-adjusted intrinsics need no scaling here.
     """
 
     batch, targets = value.shape[:2]
     channels_first = value.permute(0, 1, 4, 2, 3).reshape(batch * targets, 2, *value.shape[2:4])
-    resized = F.interpolate(channels_first, size=size, mode="bilinear", align_corners=True)
+    resized = F.interpolate(channels_first, size=size, mode="nearest")
     return resized.reshape(batch, targets, 2, *size)
 
 
@@ -71,14 +71,16 @@ def patch_nll_targets(
     return labels
 
 
-def auxiliary_nll_loss(similarity: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Glob3R Eq. (31): row-wise negative log-likelihood on valid patches."""
+def auxiliary_nll_loss(similarity_logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Glob3R Eq. (31) using RoMaV2's row-wise cosine logits."""
 
     valid = labels >= 0
     if not valid.any():
-        return similarity.sum() * 0.0
-    # cross_entropy is exactly -log(Softmax(S_m:)[n*_m]).
-    return F.cross_entropy(similarity[valid], labels[valid])
+        return similarity_logits.sum() * 0.0
+    # The literal Eq. (31) applies Softmax to S=exp(cos/tau), which would
+    # exponentiate twice. RoMaV2 [15] instead applies cross entropy directly
+    # to cos/tau logits, consistently with the probabilities used in Eq. (16).
+    return F.cross_entropy(similarity_logits[valid].float(), labels[valid])
 
 
 def generalized_charbonnier_loss(
@@ -157,14 +159,14 @@ class Glob3RMatchingLoss(nn.Module):
             self.depth_threshold,
         )
 
-        similarity = predictions["match_similarity"]
+        similarity_logits = predictions["match_similarity"]
         image_h, image_w = depths.shape[-2:]
         patch_h = image_h // 14
         patch_w = image_w // 14
         labels = patch_nll_targets(supervision.warp, supervision.confidence, patch_h, patch_w)
-        if labels.shape[-1] != similarity.shape[-2]:
+        if labels.shape[-1] != similarity_logits.shape[-2]:
             raise ValueError("similarity matrix does not match the Pi3X patch grid")
-        nll = auxiliary_nll_loss(similarity, labels)
+        nll = auxiliary_nll_loss(similarity_logits, labels)
 
         warp_predictions = [predictions["coarse_warp"], *predictions.get("warp_stages", [])]
         confidence_predictions = [

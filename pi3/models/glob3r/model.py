@@ -87,7 +87,7 @@ class MatchingDecoder(nn.Module):
 
 
 class MultiViewMatchEmbedding(nn.Module):
-    """Patch similarity and Fourier-coordinate aggregation from Eqs. (10)-(17)."""
+    """Patch logits and RoMaV2-normalized coordinate aggregation for Eqs. (10)-(17)."""
 
     def __init__(self, dim: int = 1024, temperature: float = 0.1, seed: int = 0) -> None:
         super().__init__()
@@ -125,17 +125,23 @@ class MultiViewMatchEmbedding(nn.Module):
         reference_normalized = F.normalize(reference, dim=-1)
         targets_normalized = F.normalize(targets, dim=-1)
         cosine_similarity = torch.einsum("btmc,bnc->btmn", targets_normalized, reference_normalized)
-        # Glob3R Eq. (12): S_mn^(a->b) = exp(cosim(z_m^b,z_n^a) / tau), tau=1/10.
-        similarity = torch.exp(cosine_similarity / self.temperature)
-        # Glob3R Eq. (14): stack S^(a->b) over B={1,...,N}\{a}.
+        # Glob3R Eq. (12) prints z_m^a,z_n^b, but its preceding text and
+        # Eqs. (16),(31) require target-row/reference-column z_m^b,z_n^a.
+        similarity_logits = cosine_similarity / self.temperature
+        # Unlike the literal Eqs. (12),(16), reference implementation [15]
+        # RoMaV2 normalizes cos/tau once. This avoids an unnormalized embedding
+        # whose magnitude grows with the number of reference patches.
+        match_probability = similarity_logits.softmax(dim=-1)
+        # Glob3R Eq. (14): stack the logits underlying S^(a->b) over b != a.
 
         fourier = self.fourier_reference_coordinates(
             patch_height, patch_width, match_tokens.device, match_tokens.dtype
         )
-        # Glob3R Eq. (16): chi_m^(a->b) = sum_n S_mn^(a->b) chi_n^a.
-        embeddings = torch.einsum("btmn,nc->btmc", similarity, fourier)
+        # RoMaV2-normalized Eq. (16): chi_m^(a->b) = sum_n P_mn chi_n^a,
+        # where P=Softmax(cosim/tau) along the reference-patch dimension n.
+        embeddings = torch.einsum("btmn,nc->btmc", match_probability, fourier)
         # Glob3R Eq. (17): stack all multi-view match embeddings as [B,N-1,H',W',C].
-        return similarity, embeddings, targets, target_indices
+        return similarity_logits, embeddings, targets, target_indices
 
 
 class ResidualConvUnit(nn.Module):
@@ -454,7 +460,7 @@ class WarpRefinement(nn.Module):
 
 @dataclass
 class MatchingOutput:
-    similarity: torch.Tensor
+    similarity: torch.Tensor  # Row-wise cos/tau logits, not exponentiated affinities.
     coarse_warp: torch.Tensor
     coarse_confidence: torch.Tensor
     warp_stages: List[torch.Tensor]

@@ -103,13 +103,47 @@ def render_matching_overview(
         intrinsics[selected_targets].unsqueeze(0),
         target_from_reference.unsqueeze(0),
     )
+    ground_truth_warp_panels = [image_panels[0]]
+    ground_truth_confidence_panels = [blank]
+    for target_index, ground_truth_warp, ground_truth_confidence, training_mask in zip(
+        selected_targets,
+        supervision.warp[0],
+        supervision.confidence[0],
+        supervision.mask[0],
+    ):
+        target = images[batch_index, target_index].detach().float()
+        # W^(a->b)(p_ref)=p_target, so the warped output is defined on the
+        # reference grid: output(p_ref)=target(W^(a->b)(p_ref)).
+        ground_truth_warped = sample_map_at_pixels(
+            target.unsqueeze(0), ground_truth_warp.unsqueeze(0)
+        )[0]
+        valid = ground_truth_confidence & training_mask
+        ground_truth_warp_panels.append(
+            _resize_panel(
+                ground_truth_warped * valid.unsqueeze(0), cell_height, cell_width
+            )
+        )
+        ground_truth_confidence_panels.append(
+            _resize_panel(
+                ground_truth_confidence.float().unsqueeze(0).expand(3, -1, -1),
+                cell_height,
+                cell_width,
+            )
+        )
     mask_panels = [blank] + [
         _resize_panel(mask.float().unsqueeze(0).expand(3, -1, -1), cell_height, cell_width)
         for mask in supervision.mask[0]
     ]
 
-    rows = [image_panels, warp_panels, confidence_panels, mask_panels]
-    labels = ["Images", "Warp", "Conf", "Mask"]
+    rows = [
+        image_panels,
+        warp_panels,
+        ground_truth_warp_panels,
+        confidence_panels,
+        ground_truth_confidence_panels,
+        mask_panels,
+    ]
+    labels = ["Images", "Warp", "GT Warp", "Conf", "GT Conf", "Mask"]
     label_width = 56
     canvas = Image.new(
         "RGB",

@@ -84,7 +84,7 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
 
 ## TensorBoard
 
-训练阶段每 500 个 optimizer steps 写入一张 `train/matching_overview`，验证阶段每个 epoch 取第一批写入 `val/matching_overview`。两者都是四行网格：`Images` 显示参考帧和目标帧，`Warp` 显示目标帧按预测 warp 重采样到参考视角的结果，`Conf` 显示预测置信度，`Mask` 显示几何监督 mask。默认取 1 个样本和最多 7 个目标帧；可在 `glob3r.visualization` 中调整训练记录间隔、样本数、目标帧数、置信度阈值和单元格宽度。
+训练阶段每 500 个 optimizer steps 写入一张 `train/matching_overview`，验证阶段每个 epoch 取第一批写入 `val/matching_overview`。两者都是六行网格：`Images` 显示参考帧和目标帧，`Warp` 与 `GT Warp` 分别显示预测和真值 warp 的重采样结果，`Conf` 与 `GT Conf` 分别显示预测和真值置信度，`Mask` 显示几何监督区域。默认取 1 个样本和最多 7 个目标帧；可在 `glob3r.visualization` 中调整训练记录间隔、样本数、目标帧数、置信度阈值和单元格宽度。
 
 默认日志目录是 `outputs/${name}`。在仓库根目录查看 coarse 训练日志：
 
@@ -105,3 +105,17 @@ tensorboard --logdir outputs
 ```
 
 启动后在浏览器访问 `http://localhost:6006`，在 Images 面板中选择 `train/matching_overview` 或 `val/matching_overview`。
+
+## 论文公式说明
+
+- **Eq. (2)：Warp 方向。** `W^(a->b)(p_ref)=p_target`，可视化相应计算 `output(p_ref)=target(p_target)`。
+- **Eq. (12)、(16)：Similarity 与 embedding。** 论文排版为 `cosim(z_m^a,z_n^b)`，但公式前文字以及 Eq. (16)、Eq. (31) 均要求行 `m` 为 target patch、列 `n` 为 reference patch；代码因此使用 `cosim(z_m^b,z_n^a)`。此外，论文 Eq. (16) 直接使用未归一化的 `exp(cos/tau)`，会使 embedding 幅值随 reference patch 数量变化；代码按照论文引用的 RoMaV2 [15]，改用 `Softmax(cos/tau)` 作为权重。
+- **Eq. (31)：NLL。** 直接对 `cos/tau` logits 做 cross entropy，与 Eq. (16) 使用同一概率分布；不按论文逐字形式对 `S=exp(cos/tau)` 再做 Softmax，以避免第二次指数化。
+- **Eq. (32)–(34)：多尺度监督。** GT warp、confidence 和 mask 使用 nearest 下采样；warp 数值仍是原图 target 像素坐标，不需要再次缩放内参。
+
+## 待确认的实现问题
+
+以下问题尚未修改代码：
+
+1. **RoMaV2 refinement 坐标约定不兼容。** 当前 `WarpRefinement` 使用端点归一化坐标、`align_corners=True`，并直接执行 `warp + delta_warp`；RoMaV2 使用像素中心坐标、`align_corners=False`，且 residual 除以 `4 * [W_s, H_s]`，displacement/local correlation 还使用 `scale_factor`。当前虽然能够加载形状兼容的 RoMaV2 权重，但坐标和更新尺度并不完全兼容。
+2. **Eq. (31) 的 patch 标签可能存在半个 patch 偏移。** `patch_nll_targets` 通过 `x / (W - 1) * (W_patch - 1)` 量化 target patch，并从 reference-to-target GT 中生成 target-row 标签；这相当于按图像端点对齐，而非按 ViT patch center 对齐，可能产生系统性标签偏移。
