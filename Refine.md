@@ -27,7 +27,14 @@
 | `configs/glob3r_coarse.yaml` | 完整基础实验：Pi3、matching head、loss、数据、监控，以及 coarse 阶段训练参数。 |
 | `configs/glob3r_refinement.yaml` | 继承 coarse 配置，只覆盖 refinement 阶段、帧数和学习率差异。 |
 | `datasets/glob3r_transforms.py` | Color jitter、Gaussian blur、随机灰度等训练增强。 |
+| `datasets/glob3r_scannet_dataset.py` | 为最小验证提供确定性的 ScanNet 连续帧窗口；不替代官方训练集实现。 |
 | `utils/glob3r_scheduler.py` | 支持梯度累积换算的 linear-warmup + cosine scheduler。 |
+
+### Glob3R ScanNet 验证集设计
+
+`Glob3RScannetValidationDataset` 是供 `glob3r_test.yaml` 使用的确定性小窗口数据集，不替代官方 `ScannetDataset`。它取 color、depth、pose 文件的交集，过滤可选 invalid list，并按固定 seed 从排序后的帧中选取连续窗口；首帧作为 reference，其余帧保持时间顺序。
+
+图像、米制深度、c2w pose 和内参仍通过 `BaseDataset` 的裁剪缩放流程输出。该实现仅假设相邻帧具有较高重叠，没有使用 GT overlap 或 Eq. (4) keyframe 筛选。
 
 ## 代码检查
 
@@ -108,14 +115,75 @@ tensorboard --logdir outputs
 
 ## 论文公式说明
 
-- **Eq. (2)：Warp 方向。** `W^(a->b)(p_ref)=p_target`，可视化相应计算 `output(p_ref)=target(p_target)`。
-- **Eq. (12)、(16)：Similarity 与 embedding。** 论文排版为 `cosim(z_m^a,z_n^b)`，但公式前文字以及 Eq. (16)、Eq. (31) 均要求行 `m` 为 target patch、列 `n` 为 reference patch；代码因此使用 `cosim(z_m^b,z_n^a)`。此外，论文 Eq. (16) 直接使用未归一化的 `exp(cos/tau)`，会使 embedding 幅值随 reference patch 数量变化；代码按照论文引用的 RoMaV2 [15]，改用 `Softmax(cos/tau)` 作为权重。
-- **Eq. (31)：NLL。** 直接对 `cos/tau` logits 做 cross entropy，与 Eq. (16) 使用同一概率分布；不按论文逐字形式对 `S=exp(cos/tau)` 再做 Softmax，以避免第二次指数化。
-- **Eq. (32)–(34)：多尺度监督。** GT warp、confidence 和 mask 使用 nearest 下采样；warp 数值仍是原图 target 像素坐标，不需要再次缩放内参。
+Warp 仍表示从 reference 像素到 target 坐标的映射：
+
+\[
+W^{a\rightarrow b}(p_{\mathrm{ref}})=p_{\mathrm{target}}.
+\tag{2}
+\]
+
+可视化相应计算 `output(p_ref)=target(p_target)`。
+
+相似度矩阵以 reference patch \(n\) 为行、target patch \(m\) 为列，并沿 target 维 \(m\) 归一化：
+
+\[
+L_{nm}^{a\rightarrow b}
+=
+\frac{1}{\tau}\operatorname{cosim}\!\left(z_n^a,z_m^b\right),
+\qquad
+P_{nm}^{a\rightarrow b}
+=
+\operatorname{Softmax}_{m}\!\left(L_{n:}^{a\rightarrow b}\right).
+\tag{12}
+\]
+
+代码按照 RoMaV2 [15] 直接保存 `cos/tau` logits，只进行一次 Softmax。
+
+Fourier embedding 编码 target patch 坐标：
+
+\[
+\chi_m^b=\gamma\!\left(p_m^b\right).
+\tag{15}
+\]
+
+随后使用匹配概率将 target 坐标编码聚合到 reference 网格：
+
+\[
+\chi_n^{a\rightarrow b}
+=
+\sum_m P_{nm}^{a\rightarrow b}\chi_m^b.
+\tag{16}
+\]
+
+由于 \(\chi_n^{a\rightarrow b}\) 已位于 reference 网格，DPT 将其与 reference token \(Z^a\) 拼接：
+
+\[
+F^{a\rightarrow b}
+=
+\operatorname{Proj}\!\left(Z^a\oplus\chi^{a\rightarrow b}\right).
+\tag{18}
+\]
+
+代码同时使用 reference view 的 encoder features，避免在 DPT 中混入 target 网格。
+
+NLL 对每个 reference patch 行 \(n\) 监督其对应的 target patch \(m_n^*\)：
+
+\[
+\mathcal{L}_{\mathrm{NLL}}^{a\rightarrow b}
+=
+-\frac{1}{\lvert\Omega_{\mathrm{patch}}\rvert}
+\sum_n
+\log P_{n,m_n^*}^{a\rightarrow b}.
+\tag{31}
+\]
+
+loss 直接对 \(L=\operatorname{cosim}/\tau\) 做 cross entropy，与坐标聚合使用同一行概率分布，避免对 `exp(cos/tau)` 再次 Softmax。
+
+多尺度监督保持不变：GT warp、confidence 和 mask 使用 nearest 下采样；warp 数值仍是原图 target 像素坐标，不需要再次缩放内参。
 
 ## 待确认的实现问题
 
 以下问题尚未修改代码：
 
 1. **RoMaV2 refinement 坐标约定不兼容。** 当前 `WarpRefinement` 使用端点归一化坐标、`align_corners=True`，并直接执行 `warp + delta_warp`；RoMaV2 使用像素中心坐标、`align_corners=False`，且 residual 除以 `4 * [W_s, H_s]`，displacement/local correlation 还使用 `scale_factor`。当前虽然能够加载形状兼容的 RoMaV2 权重，但坐标和更新尺度并不完全兼容。
-2. **Eq. (31) 的 patch 标签可能存在半个 patch 偏移。** `patch_nll_targets` 通过 `x / (W - 1) * (W_patch - 1)` 量化 target patch，并从 reference-to-target GT 中生成 target-row 标签；这相当于按图像端点对齐，而非按 ViT patch center 对齐，可能产生系统性标签偏移。
+2. **Eq. (31) 的 patch 标签可能存在半个 patch 偏移。** `patch_nll_targets` 通过 `x / (W - 1) * (W_patch - 1)` 量化每个 reference-row 投影对应的 target patch；这相当于按图像端点对齐，而非按 ViT patch center 对齐，可能产生系统性标签偏移。

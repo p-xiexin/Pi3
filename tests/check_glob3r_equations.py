@@ -20,7 +20,7 @@ FORMULA_IMPLEMENTATIONS = {
     12: "model.MultiViewMatchEmbedding.forward:similarity",
     13: "model.MultiViewMatchEmbedding.forward:cosine_similarity",
     14: "model.MultiViewMatchEmbedding.forward:similarity_stack",
-    15: "model.MultiViewMatchEmbedding.fourier_reference_coordinates",
+    15: "model.MultiViewMatchEmbedding.fourier_target_coordinates",
     16: "model.MultiViewMatchEmbedding.forward:embedding_aggregation",
     17: "model.MultiViewMatchEmbedding.forward:embedding_stack",
     18: "model.DPTMatchingHead.forward:pair_projection",

@@ -42,37 +42,25 @@ def patch_nll_targets(
     patch_height: int,
     patch_width: int,
 ) -> torch.Tensor:
-    """Invert reference-to-target patch matches into target-row labels for Eq. (31)."""
+    """Build reference-row, target-column labels for corrected Eq. (31)."""
 
     batch, targets, height, width = ground_truth_warp.shape[:4]
     warp = _resize_warp(ground_truth_warp, (patch_height, patch_width))
     valid = _resize_scalar_map(positive, (patch_height, patch_width), "nearest").bool()
-    labels = torch.full(
-        (batch, targets, patch_height * patch_width),
-        -1,
-        device=ground_truth_warp.device,
-        dtype=torch.long,
-    )
     target_x = (warp[:, :, 0] / max(width - 1, 1) * (patch_width - 1)).round().long()
     target_y = (warp[:, :, 1] / max(height - 1, 1) * (patch_height - 1)).round().long()
     inside = (
         (target_x >= 0) & (target_x < patch_width) & (target_y >= 0) & (target_y < patch_height)
     )
-    reference_index = torch.arange(patch_height * patch_width, device=labels.device)
-    # Collisions are deterministic; the last valid reference patch becomes n*_m.
-    for batch_index in range(batch):
-        for target_index in range(targets):
-            selected = (valid[batch_index, target_index] & inside[batch_index, target_index]).flatten()
-            target_flat = (
-                target_y[batch_index, target_index].flatten() * patch_width
-                + target_x[batch_index, target_index].flatten()
-            )
-            labels[batch_index, target_index, target_flat[selected]] = reference_index[selected]
+    # Each reference-grid row n is supervised by its projected target patch m_n*.
+    labels = (target_y * patch_width + target_x).flatten(-2)
+    valid = (valid & inside).flatten(-2)
+    labels = labels.masked_fill(~valid, -1)
     return labels
 
 
 def auxiliary_nll_loss(similarity_logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Glob3R Eq. (31) using RoMaV2's row-wise cosine logits."""
+    """Corrected Eq. (31): target label per reference-row cosine logits."""
 
     valid = labels >= 0
     if not valid.any():

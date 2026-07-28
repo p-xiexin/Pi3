@@ -120,15 +120,17 @@ train_dataset:
   length: 1000
   weights: {ScanNet: 2}
   ScanNet:
-    _target_: datasets.scannet_dataset.ScannetDataset
+    _target_: datasets.glob3r_scannet_dataset.Glob3RScannetValidationDataset
     data_root: ${scannet_root}
     z_far: 80
     frame_num: 2
-    aug_crop: 16
-    aug_focal: 0.9
+    frame_step: 1
+    sample_seed: 0
+    aug_crop: false
+    aug_focal: false
     transform:
-      # _partial_: true
-      _target_: datasets.glob3r_transforms.Glob3RImageTransform
+      _partial_: true
+      _target_: datasets.base.transforms.ImgToTensor
     mode: train
 
 train_dataloader:
@@ -139,15 +141,19 @@ test_dataset:
   length: 8
   weights: {ScanNet: 8}
   ScanNet:
-    _target_: datasets.scannet_dataset.ScannetDataset
+    _target_: datasets.glob3r_scannet_dataset.Glob3RScannetValidationDataset
     data_root: ${scannet_root}
     z_far: 80
-    frame_num: 8
+    frame_num: 2
+    frame_step: 1
+    sample_seed: 0
+    aug_crop: false
+    aug_focal: false
     resolution: [[224, 224]]
     transform:
-      # _partial_: true
+      _partial_: true
       _target_: datasets.base.transforms.ImgToTensor
-    mode: train ####
+    mode: test
 
 test_dataloader:
   drop_last: false

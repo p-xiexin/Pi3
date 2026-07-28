@@ -99,7 +99,7 @@ class MultiViewMatchEmbedding(nn.Module):
         self.register_buffer("gaussian_matrix", gaussian, persistent=True)
         self.temperature = temperature
 
-    def fourier_reference_coordinates(
+    def fourier_target_coordinates(
         self, patch_height: int, patch_width: int, device, dtype
     ) -> torch.Tensor:
         y, x = torch.meshgrid(
@@ -109,7 +109,7 @@ class MultiViewMatchEmbedding(nn.Module):
         )
         coordinates = torch.stack((x, y), dim=-1).reshape(-1, 2)
         phase = 2 * torch.pi * F.linear(coordinates, self.gaussian_matrix.to(dtype=dtype))
-        # Glob3R Eq. (15): chi_n^a = cos(2*pi*omega*W*x_n^a) (+) sin(...).
+        # Corrected Glob3R Eq. (15): encode target coordinates chi_m^b.
         return torch.cat((phase.cos(), phase.sin()), dim=-1)
 
     def forward(
@@ -124,24 +124,25 @@ class MultiViewMatchEmbedding(nn.Module):
         # Glob3R Eq. (13): cosim(x,y) = x^T y / (||x|| ||y||).
         reference_normalized = F.normalize(reference, dim=-1)
         targets_normalized = F.normalize(targets, dim=-1)
-        cosine_similarity = torch.einsum("btmc,bnc->btmn", targets_normalized, reference_normalized)
-        # Glob3R Eq. (12) prints z_m^a,z_n^b, but its preceding text and
-        # Eqs. (16),(31) require target-row/reference-column z_m^b,z_n^a.
+        cosine_similarity = torch.einsum("bnc,btmc->btnm", reference_normalized, targets_normalized)
+        # Corrected Glob3R Eq. (12): rows n are reference patches and columns m
+        # are target patches. Softmax is therefore taken over target dimension m.
         similarity_logits = cosine_similarity / self.temperature
         # Unlike the literal Eqs. (12),(16), reference implementation [15]
         # RoMaV2 normalizes cos/tau once. This avoids an unnormalized embedding
-        # whose magnitude grows with the number of reference patches.
+        # whose magnitude grows with the number of target patches.
         match_probability = similarity_logits.softmax(dim=-1)
         # Glob3R Eq. (14): stack the logits underlying S^(a->b) over b != a.
 
-        fourier = self.fourier_reference_coordinates(
+        fourier = self.fourier_target_coordinates(
             patch_height, patch_width, match_tokens.device, match_tokens.dtype
         )
-        # RoMaV2-normalized Eq. (16): chi_m^(a->b) = sum_n P_mn chi_n^a,
-        # where P=Softmax(cosim/tau) along the reference-patch dimension n.
-        embeddings = torch.einsum("btmn,nc->btmc", match_probability, fourier)
-        # Glob3R Eq. (17): stack all multi-view match embeddings as [B,N-1,H',W',C].
-        return similarity_logits, embeddings, targets, target_indices
+        # Corrected, RoMaV2-normalized Eq. (16): chi_n^(a->b) = sum_m P_nm chi_m^b.
+        # The result is indexed by n and therefore lies on the reference grid.
+        embeddings = torch.einsum("btnm,mc->btnc", match_probability, fourier)
+        # Glob3R Eq. (17): stack all multi-view match embeddings on the reference grid.
+        reference_tokens = reference[:, None].expand(-1, len(target_indices), -1, -1)
+        return similarity_logits, embeddings, reference_tokens, target_indices
 
 
 class ResidualConvUnit(nn.Module):
@@ -189,18 +190,19 @@ class DPTMatchingHead(nn.Module):
 
     def forward(
         self,
-        target_tokens: torch.Tensor,
+        reference_tokens: torch.Tensor,
         match_embeddings: torch.Tensor,
         encoder_features: Sequence[torch.Tensor],
-        target_indices: Sequence[int],
+        reference_index: int,
         patch_height: int,
         patch_width: int,
         image_height: int,
         image_width: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        batch, targets, patches, _ = target_tokens.shape
-        # Glob3R Eq. (18): F^(a->b) = Proj(Z^b (+) chi^(a->b)).
-        pair = self.pair_projection(torch.cat((target_tokens, match_embeddings), dim=-1))
+        batch, targets, patches, _ = reference_tokens.shape
+        # Corrected Glob3R Eq. (18): both Z^a and chi^(a->b) are indexed on
+        # the reference grid, so concatenating target tokens here would mix spaces.
+        pair = self.pair_projection(torch.cat((reference_tokens, match_embeddings), dim=-1))
         # Glob3R Eq. (19): pair features are stacked over all target views.
         pair_map = pair.reshape(batch * targets, patch_height, patch_width, -1).permute(0, 3, 1, 2)
         pair_map = self.pair_to_scratch(pair_map)
@@ -217,7 +219,8 @@ class DPTMatchingHead(nn.Module):
         for feature, project, to_scratch, size in zip(
             encoder_features, self.encoder_projects, self.encoder_to_scratch, target_sizes
         ):
-            selected = feature[:, target_indices]
+            # Keep the DPT skip features on the same reference grid as Eq. (18).
+            selected = feature[:, reference_index, None].expand(-1, targets, -1, -1)
             selected = selected.reshape(batch * targets, patches, -1)
             selected = selected.transpose(1, 2).reshape(batch * targets, -1, patch_height, patch_width)
             selected = to_scratch(project(selected))
@@ -513,14 +516,14 @@ class Glob3RMatchingHead(nn.Module):
             )
 
         match_tokens = self.match_decoder(geometry_tokens)
-        similarity, embeddings, targets, target_indices = self.match_embedding(
+        similarity, embeddings, reference_tokens, target_indices = self.match_embedding(
             match_tokens, patch_height, patch_width, reference_index
         )
         coarse_warp, coarse_confidence, coarse_confidence_logits = self.dpt_match(
-            targets,
+            reference_tokens,
             embeddings,
             encoder_features,
-            target_indices,
+            reference_index,
             patch_height,
             patch_width,
             height,
