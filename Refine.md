@@ -27,12 +27,12 @@
 | `configs/glob3r_coarse.yaml` | 完整基础实验：Pi3、matching head、loss、数据、监控，以及 coarse 阶段训练参数。 |
 | `configs/glob3r_refinement.yaml` | 继承 coarse 配置，只覆盖 refinement 阶段、帧数和学习率差异。 |
 | `datasets/glob3r_transforms.py` | Color jitter、Gaussian blur、随机灰度等训练增强。 |
-| `datasets/glob3r_scannet_dataset.py` | 为最小验证提供确定性的 ScanNet 连续帧窗口；不替代官方训练集实现。 |
+| `datasets/glob3r_scannet_dataset.py` | 为最小验证提供 ScanNet 连续帧窗口，并在窗口内随机排列视图。 |
 | `utils/glob3r_scheduler.py` | 支持梯度累积换算的 linear-warmup + cosine scheduler。 |
 
 ### Glob3R ScanNet 验证集设计
 
-`Glob3RScannetValidationDataset` 是供 `glob3r_test.yaml` 使用的确定性小窗口数据集，不替代官方 `ScannetDataset`。它取 color、depth、pose 文件的交集，过滤可选 invalid list，并按固定 seed 从排序后的帧中选取连续窗口；首帧作为 reference，其余帧保持时间顺序。
+`Glob3RScannetValidationDataset` 是供 `glob3r_test.yaml` 使用的小窗口数据集，不替代官方 `ScannetDataset`。它取 color、depth、pose 文件的交集，过滤可选 invalid list，先从排序后的帧中取得连续窗口，再随机打乱窗口内部顺序。因此模型仍以输入位置 0 为 reference，但 reference 不一定是序列中的第一帧。
 
 图像、米制深度、c2w pose 和内参仍通过 `BaseDataset` 的裁剪缩放流程输出。该实现仅假设相邻帧具有较高重叠，没有使用 GT overlap 或 Eq. (4) keyframe 筛选。
 
@@ -51,6 +51,16 @@ mkdir -p ckpts/Pi3
 wget -c "https://huggingface.co/yyfz233/Pi3/resolve/main/model.safetensors?download=true" \
   -O ckpts/Pi3/model.safetensors
 ```
+
+在 Linux 下下载 RoMaV2 官方 v2.0.1 权重：
+
+```bash
+mkdir -p ckpts/RoMaV2
+wget -c "https://github.com/Parskatt/RoMaV2/releases/download/v2.0.1/romav2.0.1.pt" \
+  -O ckpts/RoMaV2/romav2.0.1.pt
+```
+
+该文件是完整的 RoMaV2 checkpoint；本仓库只从中导入名称和尺寸兼容的 fine-feature 与 refinement 参数。
 
 Coarse matching：
 
@@ -84,7 +94,7 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
   --config-name glob3r_refinement \
   glob3r.backbone_checkpoint=ckpts/Pi3/model.safetensors \
   glob3r.matching_checkpoint=/path/to/coarse_matching_checkpoint.pt \
-  glob3r.romav2_refinement_checkpoint=/path/to/romav2_checkpoint.pt
+  glob3r.romav2_refinement_checkpoint=ckpts/RoMaV2/romav2.0.1.pt
 ```
 
 配置只展示仓库接入方式。完整复现论文训练分布还需要 Appendix B 所列的外部数据集；这些数据集及预训练 checkpoint 不随仓库提供。
@@ -166,6 +176,69 @@ F^{a\rightarrow b}
 
 代码同时使用 reference view 的 encoder features，避免在 DPT 中混入 target 网格。
 
+Refinement 保持 reference 到 target 的 warp 方向。为兼容 RoMaV2 checkpoint，坐标使用像素中心归一化，并以 512x512 为 displacement embedding 的基准分辨率：
+
+\[
+\bar{x}_i=-1+\frac{2i+1}{W_s},
+\qquad
+\bar{y}_j=-1+\frac{2j+1}{H_s},
+\qquad
+\alpha=\left(\frac{W}{512},\frac{H}{512}\right).
+\tag{23-RoMa}
+\]
+
+因此 Eq. (23) 中的 displacement 输入实际为 \(\alpha\odot(W^{a\rightarrow b}-x^a)\)，target feature sampling 和跨尺度插值均使用 `align_corners=False`：
+
+\[
+F_s^{a\rightarrow b}
+=
+\phi_s^a
+\oplus
+\phi_s^b\!\left(W^{a\rightarrow b}\right)
+\oplus
+g_s\!\left(\alpha\odot\left(W^{a\rightarrow b}-x^a\right)\right)
+\oplus
+\operatorname{Corr}_s\!\left(\phi_s^a,\phi_s^b,W^{a\rightarrow b}\right).
+\tag{23}
+\]
+
+Local correlation 按 RoMaV2 使用 \(1/\sqrt{C_s}\) 缩放的点积，而不是 cosine normalization：
+
+\[
+\operatorname{Corr}_{s,\delta}(x^a)
+=
+\frac{1}{\sqrt{C_s}}
+\left\langle
+\phi_s^a(x^a),
+\phi_s^b\!\left(W^{a\rightarrow b}(x^a)+\delta\right)
+\right\rangle.
+\tag{23a}
+\]
+
+RoMaV2 refiner 输出原始 displacement \(d_s\)。为了使预训练权重的输出尺度与归一化 warp 一致，代码将 Eq. (24) 中的 residual 具体化为：
+
+\[
+\left(d_s^{a\rightarrow b},\Delta p_s^{a\rightarrow b}\right)
+=
+\operatorname{Refine}_s\!\left(F_s^{a\rightarrow b}\right),
+\qquad
+\Delta W_s^{a\rightarrow b}
+=
+\frac{d_s^{a\rightarrow b}}{4[W_s,H_s]}.
+\tag{24}
+\]
+
+随后仍严格按照论文的 coarse-to-fine 方向更新：
+
+\[
+W_s^{a\rightarrow b}
+=
+\operatorname{upsample}\!\left(W_{2s}^{a\rightarrow b}\right)
++
+\Delta W_s^{a\rightarrow b}.
+\tag{25}
+\]
+
 NLL 对每个 reference patch 行 \(n\) 监督其对应的 target patch \(m_n^*\)：
 
 \[
@@ -185,5 +258,4 @@ loss 直接对 \(L=\operatorname{cosim}/\tau\) 做 cross entropy，与坐标聚�
 
 以下问题尚未修改代码：
 
-1. **RoMaV2 refinement 坐标约定不兼容。** 当前 `WarpRefinement` 使用端点归一化坐标、`align_corners=True`，并直接执行 `warp + delta_warp`；RoMaV2 使用像素中心坐标、`align_corners=False`，且 residual 除以 `4 * [W_s, H_s]`，displacement/local correlation 还使用 `scale_factor`。当前虽然能够加载形状兼容的 RoMaV2 权重，但坐标和更新尺度并不完全兼容。
-2. **Eq. (31) 的 patch 标签可能存在半个 patch 偏移。** `patch_nll_targets` 通过 `x / (W - 1) * (W_patch - 1)` 量化每个 reference-row 投影对应的 target patch；这相当于按图像端点对齐，而非按 ViT patch center 对齐，可能产生系统性标签偏移。
+1. **Eq. (31) 的 patch 标签可能存在半个 patch 偏移。** `patch_nll_targets` 通过 `x / (W - 1) * (W_patch - 1)` 量化每个 reference-row 投影对应的 target patch；这相当于按图像端点对齐，而非按 ViT patch center 对齐，可能产生系统性标签偏移。

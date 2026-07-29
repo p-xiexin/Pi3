@@ -19,8 +19,6 @@ from torch import nn
 import torch.nn.functional as F
 from torchvision.models import vgg19_bn
 
-from .geometry import sample_map_at_pixels
-
 
 @dataclass
 class GeometryPrediction:
@@ -292,22 +290,33 @@ class FineFeaturePyramid(nn.Module):
         }
 
 
+@torch.no_grad()
 def local_correlation(
     reference: torch.Tensor,
     target: torch.Tensor,
     warp: torch.Tensor,
     radius: int,
 ) -> torch.Tensor:
-    """Local target-neighborhood correlation used in Glob3R Eq. (23)."""
+    """RoMaV2 local target-neighborhood correlation for Glob3R Eq. (23)."""
 
     if radius == 0:
         return reference.new_zeros(reference.shape[0], 0, *reference.shape[-2:])
+    _, channels, height, width = reference.shape
     correlations = []
     for dy in range(-radius, radius + 1):
         for dx in range(-radius, radius + 1):
-            shifted = warp + warp.new_tensor([dx, dy]).view(1, 1, 1, 2)
-            sampled = sample_map_at_pixels(target, shifted)
-            correlations.append((F.normalize(reference, dim=1) * F.normalize(sampled, dim=1)).sum(1))
+            # RoMaV2 uses pixel-center normalized coordinates, so one feature
+            # pixel corresponds to 2/W or 2/H rather than 2/(W-1), 2/(H-1).
+            offset = warp.new_tensor([2.0 * dx / width, 2.0 * dy / height])
+            sampled = F.grid_sample(
+                target,
+                warp + offset.view(1, 1, 1, 2),
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=False,
+            )
+            # Match RoMaV2's scaled dot product, not cosine-normalized features.
+            correlations.append(((reference / channels**0.5) * sampled).sum(1))
     return torch.stack(correlations, dim=1)
 
 
@@ -352,6 +361,8 @@ class WarpRefinement(nn.Module):
     # Appendix window sizes [7,3,0] correspond to RoMaV2 radii [3,1,None].
     radii = {4: 3, 2: 1, 1: 0}
     displacement_dims = {4: 79, 2: 23, 1: 8}
+    anchor_size = 512
+    refine_init = 4.0
 
     def __init__(self) -> None:
         super().__init__()
@@ -367,21 +378,21 @@ class WarpRefinement(nn.Module):
     @staticmethod
     def _coordinate_grid(batch: int, height: int, width: int, device, dtype) -> torch.Tensor:
         y, x = torch.meshgrid(
-            torch.linspace(-1, 1, height, device=device, dtype=dtype),
-            torch.linspace(-1, 1, width, device=device, dtype=dtype),
+            torch.linspace(-1 + 1 / height, 1 - 1 / height, height, device=device, dtype=dtype),
+            torch.linspace(-1 + 1 / width, 1 - 1 / width, width, device=device, dtype=dtype),
             indexing="ij",
         )
         return torch.stack((x, y), dim=-1).unsqueeze(0).expand(batch, -1, -1, -1)
 
     @staticmethod
     def _normalize_warp(warp: torch.Tensor, image_height: int, image_width: int) -> torch.Tensor:
-        scale = warp.new_tensor([image_width - 1, image_height - 1]).view(1, 2, 1, 1)
-        return 2.0 * warp / scale.clamp_min(1) - 1.0
+        scale = warp.new_tensor([image_width, image_height]).view(1, 2, 1, 1)
+        return 2.0 * (warp + 0.5) / scale - 1.0
 
     @staticmethod
     def _pixel_warp(warp: torch.Tensor, image_height: int, image_width: int) -> torch.Tensor:
-        scale = warp.new_tensor([image_width - 1, image_height - 1]).view(1, 2, 1, 1)
-        return (warp + 1.0) * 0.5 * scale
+        scale = warp.new_tensor([image_width, image_height]).view(1, 2, 1, 1)
+        return (warp + 1.0) * 0.5 * scale - 0.5
 
     def forward(
         self,
@@ -398,9 +409,8 @@ class WarpRefinement(nn.Module):
         # reference-target pair as an independent sample for 2D refinement.
         batch, targets = coarse_warp.shape[:2]
         warp = coarse_warp.reshape(batch * targets, 2, *coarse_warp.shape[-2:])
-        # RoMaV2 refiners operate in normalized [-1,1] coordinates. Keeping
-        # that convention makes the Appendix-B checkpoint initialization and
-        # its displacement/output scales compatible; public outputs remain px.
+        # RoMaV2 uses pixel-center normalized [-1,1] coordinates. Public
+        # Glob3R outputs remain zero-based full-image pixel coordinates.
         warp = self._normalize_warp(warp, image_height, image_width)
         # coarse_confidence_logits: [B,T,1,H/4,W/4] -> [B*T,1,H/4,W/4].
         confidence_logits = coarse_confidence_logits.reshape(
@@ -420,37 +430,62 @@ class WarpRefinement(nn.Module):
             target = features[:, target_indices].reshape(batch * targets, *reference.shape[1:])
             feature_height, feature_width = reference.shape[-2:]
             if warp.shape[-2:] != (feature_height, feature_width):
-                # Normalized coordinate values are resolution-independent; only
-                # their spatial prediction grid becomes [B*T,2,H_s,W_s].
-                warp = F.interpolate(warp, size=(feature_height, feature_width), mode="bilinear", align_corners=True)
-                confidence_logits = F.interpolate(
-                    confidence_logits, size=(feature_height, feature_width), mode="bilinear", align_corners=True
+                # Eq. (25): only the reference prediction grid is upsampled;
+                # normalized target-coordinate values remain resolution-independent.
+                warp = F.interpolate(
+                    warp,
+                    size=(feature_height, feature_width),
+                    mode="bilinear",
+                    align_corners=False,
                 )
-            # [B*T,2,H_s,W_s] -> [B*T,H_s,W_s,2] for coordinate operations;
-            # feature_warp contains pixel coordinates in the stride-s feature map.
+                confidence_logits = F.interpolate(
+                    confidence_logits,
+                    size=(feature_height, feature_width),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            # [B*T,2,H_s,W_s] -> [B*T,H_s,W_s,2], still normalized target coordinates.
             warp_xy = warp.permute(0, 2, 3, 1)
-            feature_scale = warp.new_tensor([feature_width - 1, feature_height - 1])
-            feature_warp = (warp_xy + 1.0) * 0.5 * feature_scale
-            # Only the previous warp estimate is detached between stages.
-            # Gradients must still reach both fine-feature towers in Eq. (23).
-            # target_sampled: [B*T,C_s,H_s,W_s].
-            target_sampled = sample_map_at_pixels(target, feature_warp)
+            # RoMaV2 detaches target sampling from the fine-feature tower;
+            # the shared tower still receives gradients through phi_s^a.
+            with torch.no_grad():
+                target_sampled = F.grid_sample(
+                    target,
+                    warp_xy,
+                    mode="bilinear",
+                    padding_mode="zeros",
+                    align_corners=False,
+                )
             # normalized_grid: [B*T,H_s,W_s,2]; displacement: [B*T,2,H_s,W_s].
             normalized_grid = self._coordinate_grid(
                 batch * targets, feature_height, feature_width, warp.device, warp.dtype
             )
             displacement = (warp_xy - normalized_grid).permute(0, 3, 1, 2)
+            # RoMaV2 Eq. (23) parameterization anchors displacement features at 512x512.
+            image_scale = warp.new_tensor(
+                [image_width / self.anchor_size, image_height / self.anchor_size]
+            ).view(1, 2, 1, 1)
             # correlation: [B*T,K_s,H_s,W_s], K_s=(2r_s+1)^2 or 0 at stride 1.
-            correlation = local_correlation(reference, target, feature_warp, self.radii[stride])
+            correlation = local_correlation(reference, target, warp_xy, self.radii[stride])
             # Glob3R Eq. (23): concat phi_a, sampled phi_b(W), g_s(W-x_a), and Corr_s.
             # refine_feature: [B*T,2C_s+D_s+K_s,H_s,W_s].
             refine_feature = torch.cat(
-                (reference, target_sampled, self.displacement[str(stride)](displacement), correlation), dim=1
+                (
+                    reference,
+                    target_sampled,
+                    self.displacement[str(stride)](image_scale * displacement),
+                    correlation,
+                ),
+                dim=1,
             )
             # Both residuals keep the flattened pair batch: [B*T,2/1,H_s,W_s].
             delta_warp, delta_confidence = self.blocks[str(stride)](refine_feature)
-            # Glob3R Eq. (25): W_s <- upsample(W_2s) + Delta W_s.
-            warp = warp + delta_warp
+            # Glob3R Eq. (25) writes Delta W_s directly. RoMaV2's checkpoint
+            # parameterizes it as raw d_s / (4 * [W_s,H_s]).
+            residual_scale = delta_warp.new_tensor(
+                [self.refine_init * feature_width, self.refine_init * feature_height]
+            ).view(1, 2, 1, 1)
+            warp = warp + delta_warp / residual_scale
             confidence_logits = confidence_logits + delta_confidence
             pixel_warp = self._pixel_warp(warp, image_height, image_width)
             # Restore the target-view axis for public outputs at each stride.

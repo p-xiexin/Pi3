@@ -1,4 +1,4 @@
-"""Deterministic high-overlap ScanNet dataset for Glob3R debugging/validation."""
+"""High-overlap ScanNet windows with randomized in-window view order."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from datasets.base.transforms import lanczos
 
 
 class Glob3RScannetValidationDataset(BaseDataset):
-    """Return one deterministic, high-overlap frame window from each scene.
+    """Return one high-overlap frame window per scene with randomized view order.
 
     Expected directory layout::
 
@@ -195,8 +195,6 @@ class Glob3RScannetValidationDataset(BaseDataset):
         return len(self.sequences)
 
     def _get_views(self, index, resolution, rng):
-        del rng
-
         scene = self.sequences[int(index)]
         valid_frames = self.scene_frames[scene]
         required_span = (self.frame_num - 1) * self.frame_step + 1
@@ -209,16 +207,23 @@ class Glob3RScannetValidationDataset(BaseDataset):
             )
         )
         positions = start + np.arange(self.frame_num) * self.frame_step
-        frame_indices = [
+        window_frame_indices = [
             valid_frames[int(position)]
             for position in positions
         ]
+        # Select a temporally local window first, then randomize only its view
+        # order. The matching model still uses batch position 0 as reference,
+        # but that reference is no longer forced to be the earliest frame.
+        frame_indices = window_frame_indices.copy()
+        rng.shuffle(frame_indices)
 
         self.this_views_info = {
             "scene": scene,
-            "sampling": "fixed_high_overlap",
+            "sampling": "local_window_random_order",
             "frame_step": self.frame_step,
+            "window_idxs": window_frame_indices,
             "idxs": frame_indices,
+            "reference": frame_indices[0],
         }
 
         base_path = osp.join(self.data_root, scene)
