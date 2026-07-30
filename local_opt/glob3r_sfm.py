@@ -1,0 +1,129 @@
+"""Glob3R model specialization used only by the SfM inference pipeline."""
+
+from __future__ import annotations
+
+from typing import Callable, Dict, Iterable
+
+import torch
+
+from pi3.models.glob3r.glob3r_training import Glob3R
+
+
+class Glob3RSfM(Glob3R):
+    """Reuse one frozen Pi3 pass for Eq. (1) and multi-keyframe Eq. (2)."""
+
+    def _extract_window_features(self, images: torch.Tensor):
+        """Extract frozen Pi3 features once for every reference in the window."""
+
+        batch, frames, _, height, width = images.shape
+        backbone = self.backbone
+        backbone.eval()
+        self._captured_encoder_features.clear()
+        normalized = (images - backbone.image_mean) / backbone.image_std
+        encoded = backbone.encoder(
+            normalized.reshape(batch * frames, 3, height, width), is_training=True
+        )
+        if isinstance(encoded, dict):
+            encoded = encoded["x_norm_patchtokens"]
+        geometry_tokens, positions = backbone.decode(encoded, frames, height, width)
+
+        encoder_features = []
+        for layer_index in self.encoder_layers:
+            if layer_index not in self._captured_encoder_features:
+                raise RuntimeError(f"encoder layer {layer_index} did not produce a feature")
+            feature = self._captured_encoder_features[layer_index]
+            encoder_features.append(
+                feature.reshape(batch, frames, feature.shape[1], feature.shape[2])
+            )
+        return geometry_tokens, positions, encoder_features
+
+    def _predict_geometry(
+        self,
+        geometry_tokens: torch.Tensor,
+        positions: torch.Tensor,
+        frames: int,
+        height: int,
+        width: int,
+    ) -> Dict[str, torch.Tensor | None]:
+        """Decode the geometry tuple ``{T_i, X_i, C_i, m_i}`` in Eq. (1)."""
+
+        backbone = self.backbone
+        required = ("point_decoder", "point_head", "camera_decoder", "camera_head")
+        missing = [name for name in required if not hasattr(backbone, name)]
+        if missing:
+            raise RuntimeError(f"backbone cannot produce Eq. (1) geometry; missing {missing}")
+
+        batch = geometry_tokens.shape[0] // frames
+        patch_height, patch_width = height // backbone.patch_size, width // backbone.patch_size
+        with torch.amp.autocast(device_type=geometry_tokens.device.type, enabled=False):
+            point_hidden = backbone.point_decoder(geometry_tokens, xpos=positions).float()
+            point_output = backbone.point_head(
+                [point_hidden[:, backbone.patch_start_idx:]], (height, width)
+            ).reshape(batch, frames, height, width, -1)
+            xy, depth = point_output.split((2, 1), dim=-1)
+            depth = depth.exp()
+            local_points = torch.cat((xy * depth, depth), dim=-1)
+
+            camera_hidden = backbone.camera_decoder(geometry_tokens, xpos=positions).float()
+            camera_poses = backbone.camera_head(
+                camera_hidden[:, backbone.patch_start_idx:], patch_height, patch_width
+            ).reshape(batch, frames, 4, 4)
+
+            confidence = None
+            if hasattr(backbone, "conf_decoder") and hasattr(backbone, "conf_head"):
+                confidence_hidden = backbone.conf_decoder(geometry_tokens, xpos=positions).float()
+                confidence = backbone.conf_head(
+                    [confidence_hidden[:, backbone.patch_start_idx:]], (height, width)
+                ).reshape(batch, frames, height, width, -1)
+
+        return {
+            "camera_poses": camera_poses,
+            "local_points": local_points,
+            "conf": confidence,
+            # Current Pi3 has no Pi3X metric-scale head.
+            "metric": None,
+        }
+
+    @torch.no_grad()
+    def infer_window(
+        self,
+        images: torch.Tensor,
+        reference_indices: Iterable[int]
+        | Callable[[Dict[str, torch.Tensor | None]], Iterable[int]],
+    ) -> Dict[str, object]:
+        """Run Sec. 3.2 with one Eq. (1) pass and reused Eq. (2) features."""
+
+        if images.ndim != 5:
+            raise ValueError(f"images must be [B,N,3,H,W], got {tuple(images.shape)}")
+        batch, frames, _, height, width = images.shape
+        if batch != 1:
+            raise ValueError("SfM window inference currently requires batch size one")
+        if height % self.backbone.patch_size or width % self.backbone.patch_size:
+            raise ValueError("image height and width must be divisible by Pi3 patch_size")
+
+        geometry_tokens, positions, encoder_features = self._extract_window_features(images)
+        geometry = self._predict_geometry(
+            geometry_tokens, positions, frames, height, width
+        )
+        selected = reference_indices(geometry) if callable(reference_indices) else reference_indices
+        references = tuple(dict.fromkeys(int(index) for index in selected))
+        if not references or any(index < 0 or index >= frames for index in references):
+            raise ValueError(f"invalid reference indices {references} for {frames} frames")
+
+        patch_start = int(self.backbone.patch_start_idx)
+        patch_tokens = geometry_tokens.reshape(
+            batch, frames, geometry_tokens.shape[1], geometry_tokens.shape[2]
+        )[:, :, patch_start:]
+        matches = {
+            reference_index: self.glob3r_matching_head(
+                patch_tokens,
+                encoder_features,
+                images,
+                reference_index=reference_index,
+            )
+            for reference_index in references
+        }
+        return {"geometry": geometry, "matches": matches}
+
+
+__all__ = ["Glob3RSfM"]
