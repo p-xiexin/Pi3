@@ -3,27 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Callable, Mapping, Optional
 
+import numpy as np
 import torch
-import torch.nn.functional as F
 
 from pi3.models.glob3r.geometry import bundle_adjustment_objective
 from pi3.utils.geometry import depth_edge
 
-from .association import (
-    PoseGraph,
-    Tracks,
-    _TrackAccumulator,
-    _confidence_probability,
-)
-from .optimization import (
-    BundleAdjustmentResult,
-    bundle_adjust,
-    maximum_spanning_tree_initialization,
-    robust_rotation_averaging,
-    translation_averaging,
-)
+from .optimization import BundleAdjustmentResult, bundle_adjust
+from .tracker import Tracker, Tracks
 
 
 @dataclass
@@ -52,14 +41,12 @@ class Glob3RSfMConfig:
 class SfMResult:
     world_to_camera: torch.Tensor
     camera_to_world: torch.Tensor
+    points_3d_before_ba: torch.Tensor
     points_3d: torch.Tensor
     intrinsics: torch.Tensor
     distortion: torch.Tensor
-    keyframes: list[int]
-    observations: torch.Tensor
-    observation_camera: torch.Tensor
-    observation_point: torch.Tensor
-    tracking_confidence: torch.Tensor
+    keyframes: np.ndarray
+    tracks: Tracks
     raw_points: torch.Tensor
     raw_colors: torch.Tensor
     raw_frame_ids: torch.Tensor
@@ -70,41 +57,14 @@ class SfMResult:
     bundle_adjustment_objective: torch.Tensor
 
 
-def _valid_projection_count(
-    candidate_points: torch.Tensor,
-    candidate_confidence: torch.Tensor,
-    candidate_pose: torch.Tensor,
-    keyframe_poses: torch.Tensor,
-    keyframe_intrinsics: torch.Tensor,
-    confidence_threshold: float,
-) -> torch.Tensor:
-    height, width = candidate_points.shape[:2]
-    keyframe_from_candidate = torch.linalg.inv(keyframe_poses) @ candidate_pose
-    points = candidate_points.reshape(-1, 3)
-    transformed = torch.einsum(
-        "kij,mj->kmi", keyframe_from_candidate[:, :3, :3], points
-    ) + keyframe_from_candidate[:, None, :3, 3]
-    homogeneous = torch.einsum("kij,kmj->kmi", keyframe_intrinsics, transformed)
-    xy = homogeneous[..., :2] / homogeneous[..., 2:3].clamp_min(1.0e-8)
-    valid = (
-        (candidate_confidence.reshape(1, -1) > confidence_threshold)
-        & (transformed[..., 2] > 0)
-        & (xy[..., 0] >= 0)
-        & (xy[..., 0] <= width - 1)
-        & (xy[..., 1] >= 0)
-        & (xy[..., 1] <= height - 1)
-    )
-    return valid.sum(dim=-1)
-
-
 def select_keyframes_eq4(
-    local_points: torch.Tensor,
-    confidence: torch.Tensor,
-    camera_poses: torch.Tensor,
+    Xs: torch.Tensor,
+    Cs: torch.Tensor,
+    T_CWs: torch.Tensor,
     intrinsics: torch.Tensor,
     projection_threshold: float,
     confidence_threshold: float,
-) -> list[int]:
+) -> np.ndarray:
     """Select keyframes using the valid-projection count in paper Eq. (4).
 
     n_t = max_{r in K} sum_u 1[pi(T_{t->r} X_t(u)) in D,
@@ -113,21 +73,37 @@ def select_keyframes_eq4(
     """
 
     keyframes = [0]
-    pixel_threshold = (
-        projection_threshold * local_points.shape[1] * local_points.shape[2]
-    )
-    for candidate in range(1, local_points.shape[0]):
-        count = _valid_projection_count(
-            local_points[candidate],
-            confidence[candidate],
-            camera_poses[candidate],
-            camera_poses[keyframes],
-            intrinsics[keyframes],
-            confidence_threshold,
-        ).max()
+    height, width = Xs.shape[1:3]
+    pixel_threshold = projection_threshold * height * width
+    for candidate in range(1, Xs.shape[0]):
+        # Eq. (4): transform candidate points X_t into every existing
+        # keyframe r, then retain the largest valid projection count n_t.
+        keyframe_from_candidate = (
+            torch.linalg.inv(T_CWs[keyframes]) @ T_CWs[candidate]
+        )
+        # [H, W, 3] -> [M, 3]
+        candidate_points = Xs[candidate].reshape(-1, 3)
+        transformed = torch.einsum(
+            "kij,mj->kmi",
+            keyframe_from_candidate[:, :3, :3],
+            candidate_points,
+        ) + keyframe_from_candidate[:, None, :3, 3]
+        projected = torch.einsum(
+            "kij,kmj->kmi", intrinsics[keyframes], transformed
+        )
+        xy = projected[..., :2] / projected[..., 2:3].clamp_min(1.0e-8)
+        valid = (
+            (Cs[candidate].reshape(1, -1) > confidence_threshold)
+            & (transformed[..., 2] > 0)
+            & (xy[..., 0] >= 0)
+            & (xy[..., 0] <= width - 1)
+            & (xy[..., 1] >= 0)
+            & (xy[..., 1] <= height - 1)
+        )
+        count = valid.sum(dim=-1).max()
         if count < pixel_threshold:
             keyframes.append(candidate)
-    return keyframes
+    return np.asarray(keyframes, dtype=np.int64)
 
 
 def _undistort_normalized(
@@ -170,6 +146,7 @@ class Glob3RSfMPipeline:
     def __init__(self, model, config: Optional[Glob3RSfMConfig] = None):
         self.model = model.eval()
         self.config = config or Glob3RSfMConfig()
+        self.tracker = Tracker(self.model, self.config)
 
     @torch.no_grad()
     def run(
@@ -186,153 +163,93 @@ class Glob3RSfMPipeline:
         images = images.float()
         intrinsics = intrinsics.to(device=images.device, dtype=images.dtype)
         if intrinsics.ndim == 2:
-            intrinsics = intrinsics[None].expand(frame_count, -1, -1).clone()
+            # [3, 3] -> [1, 3, 3]
+            intrinsics = intrinsics.unsqueeze(dim=0)
+            # [1, 3, 3] -> [N, 3, 3]
+            intrinsics = intrinsics.expand(frame_count, -1, -1).clone()
 
-        keyframes: list[int] = []
+        # [N, 3, H, W] -> [B, N, 3, H, W]
+        window_images = images.unsqueeze(dim=0)
 
-        def select_keyframes(geometry: dict[str, torch.Tensor | None]) -> list[int]:
-            local_points = geometry["local_points"][0]
-            confidence = _confidence_probability(
-                None if geometry.get("conf") is None else geometry["conf"][0],
-                local_points.shape[:3],
-                local_points.device,
-                local_points.dtype,
-            )
-            keyframes[:] = select_keyframes_eq4(
-                local_points,
-                confidence,
-                geometry["camera_poses"][0],
-                intrinsics,
-                projection_threshold=self.config.keyframe_projection_threshold,
-                confidence_threshold=self.config.depth_confidence_threshold,
-            )
-            return keyframes
-
-        # Sec. 3.2: evaluate Eq. (1) once, then evaluate Eq. (2) once for each
-        # keyframe selected by Eq. (4), reusing the extracted window features.
+        # Sec. 3.2: evaluate Eq. (1) once, select Eq. (4) keyframes here, then
+        # evaluate Eq. (2) for those references using the cached features.
         print(f"Backbone inference: frames [0, {frame_count - 1}]")
-        output = self.model.infer_window(images[None], select_keyframes)
-        geometry = output["geometry"]
-        local_points = geometry["local_points"][0]
-        point_confidence = _confidence_probability(
-            None if geometry.get("conf") is None else geometry["conf"][0],
-            local_points.shape[:3],
-            local_points.device,
-            local_points.dtype,
+        geometry, patch_tokens, encoder_features = self.model.infer_window(
+            window_images
         )
+        # [B, N, H, W, 3] -> [N, H, W, 3]
+        Xs = geometry["local_points"].squeeze(dim=0)
+        # [B, N, 4, 4] -> [N, 4, 4]
+        T_CWs = geometry["camera_poses"].squeeze(dim=0)
+        # [B, N, H, W, 1] -> [N, H, W, 1]
+        Cs_logits = geometry["conf"].squeeze(dim=0)
+        # [N, H, W, 1] -> [N, H, W]
+        Cs = Cs_logits.sigmoid().squeeze(dim=-1)
         metric = geometry.get("metric")
-        metric_scale = torch.as_tensor(
+        ss = torch.as_tensor(
             1.0 if metric is None else metric.reshape(-1)[0],
             device=images.device,
             dtype=images.dtype,
         )
-        matches = output["matches"]
-
-        if matching_callback is not None:
-            matching_callback(images, matches)
-
-        # Sec. 3.2: convert all keyframe-to-frame warps into tracks and local
-        # relative-pose edges.
-        accumulator = _TrackAccumulator(self.config, intrinsics)
-        accumulator.add_window(
-            tuple(range(frame_count)), geometry, matches, metric_scale
+        keyframes = select_keyframes_eq4(
+            Xs,
+            Cs,
+            T_CWs,
+            intrinsics,
+            projection_threshold=self.config.keyframe_projection_threshold,
+            confidence_threshold=self.config.depth_confidence_threshold,
         )
-        tracks = accumulator.build()
-        world_to_camera, points_3d, motion_objective = self._motion_average(
-            accumulator.graph, tracks
+        tracking = self.tracker(
+            patch_tokens,
+            encoder_features,
+            window_images,
+            Xs,
+            Cs,
+            T_CWs,
+            ss,
+            intrinsics,
+            keyframes,
+            matching_callback=matching_callback,
         )
 
         # Sec. 3.3: motion averaging implements Eq. (5); BA implements Eq. (6).
-        ba = self._bundle_adjust(world_to_camera, points_3d, tracks)
+        ba = self._bundle_adjust(
+            tracking.world_to_camera,
+            tracking.points_3d,
+            tracking.tracks,
+        )
 
         # Sec. 3.3: recover keyframe depth scales and fuse dense geometry.
         raw_points, raw_colors, raw_frame_ids = self._reconstruct_raw(
-            images, geometry, point_confidence, metric_scale, keyframes
+            images, Xs, T_CWs, Cs, ss, keyframes
         )
         dense_points, dense_colors, dense_frame_ids = self._reconstruct_dense(
             ba,
             images,
-            geometry,
-            point_confidence,
-            metric_scale,
-            tracks,
+            Xs,
+            Cs,
+            ss,
+            tracking.tracks,
             keyframes,
         )
         return SfMResult(
             world_to_camera=ba.world_to_camera,
             camera_to_world=torch.linalg.inv(ba.world_to_camera),
+            points_3d_before_ba=tracking.points_3d,
             points_3d=ba.points_3d,
             intrinsics=ba.intrinsics,
             distortion=ba.distortion,
             keyframes=keyframes,
-            observations=tracks.observations,
-            observation_camera=tracks.camera_indices,
-            observation_point=tracks.point_indices,
-            tracking_confidence=tracks.confidence,
+            tracks=tracking.tracks,
             raw_points=raw_points,
             raw_colors=raw_colors,
             raw_frame_ids=raw_frame_ids,
             dense_points=dense_points,
             dense_colors=dense_colors,
             dense_frame_ids=dense_frame_ids,
-            motion_objective=motion_objective,
+            motion_objective=tracking.objective,
             bundle_adjustment_objective=ba.objective,
         )
-
-    def _motion_average(
-        self, graph: PoseGraph, tracks: Tracks
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Initialize rotations and solve the translation objective in Eq. (5)."""
-
-        if not graph.target_from_source:
-            raise RuntimeError("no valid pose-graph edges were constructed")
-        device, dtype = tracks.observations.device, tracks.observations.dtype
-        edge_source = torch.tensor(graph.source, device=device)
-        edge_target = torch.tensor(graph.target, device=device)
-        edge_transform = torch.stack(graph.target_from_source).to(dtype)
-        edge_weight = torch.tensor(graph.weight, device=device, dtype=dtype)
-        frame_count = tracks.intrinsics.shape[0]
-
-        initial_world_to_camera = maximum_spanning_tree_initialization(
-            frame_count, edge_source, edge_target, edge_transform, edge_weight
-        )
-        rotations = robust_rotation_averaging(
-            initial_world_to_camera,
-            edge_source,
-            edge_target,
-            edge_transform,
-            edge_weight,
-            iterations=self.config.rotation_iterations,
-        )
-        initial_centers = -torch.einsum(
-            "nij,nj->ni",
-            initial_world_to_camera[:, :3, :3].transpose(-1, -2),
-            initial_world_to_camera[:, :3, 3],
-        )
-        homogeneous = F.pad(tracks.observations, (0, 1), value=1.0)
-        rays = torch.einsum(
-            "oij,oj->oi",
-            torch.linalg.inv(tracks.intrinsics[tracks.camera_indices]),
-            homogeneous,
-        )
-        motion = translation_averaging(
-            rotations,
-            rays,
-            tracks.camera_indices,
-            tracks.point_indices,
-            tracks.confidence,
-            initial_centers,
-            tracks.predicted_depth,
-            iterations=self.config.translation_iterations,
-        )
-        world_to_camera = torch.eye(4, device=device, dtype=dtype).repeat(
-            frame_count, 1, 1
-        )
-        world_to_camera[:, :3, :3] = rotations
-        world_to_camera[:, :3, 3] = -torch.einsum(
-            "nij,nj->ni", rotations, motion.camera_centers
-        )
-        return world_to_camera, motion.points_3d, motion.objective
 
     def _bundle_adjust(
         self,
@@ -407,45 +324,42 @@ class Glob3RSfMPipeline:
     def _reconstruct_raw(
         self,
         images: torch.Tensor,
-        geometry: dict[str, torch.Tensor | None],
-        point_confidence: torch.Tensor,
-        metric_scale: torch.Tensor,
-        keyframes: Sequence[int],
+        Xs: torch.Tensor,
+        T_CWs: torch.Tensor,
+        Cs: torch.Tensor,
+        ss: torch.Tensor,
+        keyframes: np.ndarray,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fuse Eq. (4) keyframe point maps using predicted camera poses."""
 
-        frame_indices = torch.as_tensor(
-            keyframes,
-            device=images.device,
-            dtype=torch.long,
-        )
+        frame_indices = torch.arange(Xs.shape[0], device=images.device)[keyframes]
         images = images[frame_indices]
-        local_points = geometry["local_points"][0, frame_indices] * metric_scale
-        point_confidence = point_confidence[frame_indices]
-        camera_to_world = geometry["camera_poses"][0, frame_indices].clone()
-        camera_to_world[:, :3, 3] *= metric_scale
-        world_points = torch.einsum(
-            "nij,nhwj->nhwi", camera_to_world[:, :3, :3], local_points
-        ) + camera_to_world[:, None, None, :3, 3]
+        Xs = Xs[frame_indices] * ss
+        Cs = Cs[frame_indices]
+        T_CWs = T_CWs[frame_indices].clone()
+        T_CWs[:, :3, 3] *= ss
+        X_Ws = torch.einsum(
+            "nij,nhwj->nhwi", T_CWs[:, :3, :3], Xs
+        ) + T_CWs[:, None, None, :3, 3]
         valid = (
-            (point_confidence > self.config.depth_confidence_threshold)
-            & ~depth_edge(local_points[..., 2], rtol=0.03)
-            & torch.isfinite(world_points).all(dim=-1)
-            & (local_points[..., 2] > 0)
+            (Cs > self.config.depth_confidence_threshold)
+            & ~depth_edge(Xs[..., 2], rtol=0.03)
+            & torch.isfinite(X_Ws).all(dim=-1)
+            & (Xs[..., 2] > 0)
         )
         colors = images.permute(0, 2, 3, 1)
         frame_ids = frame_indices[:, None, None].expand_as(valid)
-        return world_points[valid], colors[valid], frame_ids[valid]
+        return X_Ws[valid], colors[valid], frame_ids[valid]
 
     def _reconstruct_dense(
         self,
         ba: BundleAdjustmentResult,
         images: torch.Tensor,
-        geometry: dict[str, torch.Tensor | None],
-        point_confidence: torch.Tensor,
-        metric_scale: torch.Tensor,
+        Xs: torch.Tensor,
+        Cs: torch.Tensor,
+        ss: torch.Tensor,
         tracks: Tracks,
-        keyframes: Sequence[int],
+        keyframes: np.ndarray,
     ) -> tuple[
         Optional[torch.Tensor],
         Optional[torch.Tensor],
@@ -462,7 +376,7 @@ class Glob3RSfMPipeline:
             if mask.sum() < 2:
                 continue
             image = images[frame]
-            depth = geometry["local_points"][0, frame, ..., 2] * metric_scale
+            depth = Xs[frame, ..., 2] * ss
             predicted = tracks.predicted_depth[mask]
             weight = tracks.confidence[mask].clamp_min(0)
             camera_point = (
@@ -522,9 +436,7 @@ class Glob3RSfMPipeline:
                 f"relative_mad={float(relative_mad):.4f}"
             )
             depth = depth * scale
-            confidence_mask = (
-                point_confidence[frame] > self.config.depth_confidence_threshold
-            )
+            confidence_mask = Cs[frame] > self.config.depth_confidence_threshold
             y_grid, x_grid = torch.meshgrid(
                 torch.arange(depth.shape[0], device=depth.device, dtype=depth.dtype),
                 torch.arange(depth.shape[1], device=depth.device, dtype=depth.dtype),

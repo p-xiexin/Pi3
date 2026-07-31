@@ -260,7 +260,7 @@ class MotionAveragingResult:
     objective: torch.Tensor
 
 
-def translation_averaging(
+def opt_pose_ray(
     rotations: torch.Tensor,
     normalized_rays: torch.Tensor,
     observation_camera: torch.Tensor,
@@ -405,7 +405,12 @@ def bundle_adjust(
         raise ValueError("bundle adjustment requires track observations")
 
     if initial_intrinsics.ndim == 2:
-        initial_intrinsics = initial_intrinsics[None].expand(camera_count, -1, -1).clone()
+        # [3, 3] -> [1, 3, 3]
+        initial_intrinsics = initial_intrinsics.unsqueeze(dim=0)
+        # [1, 3, 3] -> [N, 3, 3]
+        initial_intrinsics = initial_intrinsics.expand(
+            camera_count, -1, -1
+        ).clone()
     if initial_intrinsics.shape[0] != camera_count:
         raise ValueError("initial_intrinsics must contain one matrix per camera")
     if shared_intrinsics:
@@ -570,5 +575,5 @@ __all__ = [
     "se3_exp",
     "so3_exp",
     "so3_log",
-    "translation_averaging",
+    "opt_pose_ray",
 ]

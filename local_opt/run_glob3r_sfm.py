@@ -139,14 +139,16 @@ def main():
             "image_paths": [str(path) for path in paths],
             "world_to_camera": result.world_to_camera.cpu(),
             "camera_to_world": result.camera_to_world.cpu(),
+            "points_3d_before_ba": result.points_3d_before_ba.cpu(),
             "points_3d": result.points_3d.cpu(),
             "intrinsics": result.intrinsics.cpu(),
             "distortion": result.distortion.cpu(),
             "keyframes": result.keyframes,
-            "observations": result.observations.cpu(),
-            "observation_camera": result.observation_camera.cpu(),
-            "observation_point": result.observation_point.cpu(),
-            "tracking_confidence": result.tracking_confidence.cpu(),
+            "observations": result.tracks.observations.cpu(),
+            "observation_camera": result.tracks.camera_indices.cpu(),
+            "observation_point": result.tracks.point_indices.cpu(),
+            "tracking_confidence": result.tracks.confidence.cpu(),
+            "predicted_depth": result.tracks.predicted_depth.cpu(),
             "pi3_raw_points": result.raw_points.cpu(),
             "pi3_raw_colors": result.raw_colors.cpu(),
             "pi3_raw_frame_ids": result.raw_frame_ids.cpu(),
@@ -158,7 +160,8 @@ def main():
     )
     raw_point_cloud_output = output.parent / "pi3_raw.ply"
     sfm_point_cloud_output = output.parent / "pi3_sfm.ply"
-    sparse_tracks_output = output.parent / "sparse_tracks.ply"
+    sparse_tracks_before_ba_output = output.parent / "sparse_tracks_before_ba.ply"
+    sparse_tracks_after_ba_output = output.parent / "sparse_tracks_after_ba.ply"
     save_ply(
         raw_point_cloud_output,
         result.raw_points,
@@ -172,23 +175,51 @@ def main():
         {"frame_id": result.dense_frame_ids},
     )
     observation_count = torch.bincount(
-        result.observation_point,
+        result.tracks.point_indices,
         minlength=result.points_3d.shape[0],
     )
+    # Observations are inserted with their reference/keyframe entry first.
+    # Preserve that anchor frame per optimized BA point so the sparse and dense
+    # clouds can be colored with the same ``frame_id`` field.
+    observation_order = torch.arange(
+        result.tracks.point_indices.numel(),
+        device=result.tracks.point_indices.device,
+    )
+    first_observation = torch.full(
+        (result.points_3d.shape[0],),
+        observation_order.numel(),
+        device=result.tracks.point_indices.device,
+        dtype=torch.long,
+    )
+    first_observation.scatter_reduce_(
+        0,
+        result.tracks.point_indices,
+        observation_order,
+        reduce="amin",
+        include_self=True,
+    )
+    if (first_observation == observation_order.numel()).any():
+        raise RuntimeError("a BA point has no track observation")
+    sparse_frame_ids = result.tracks.camera_indices[first_observation]
+    sparse_scalar_fields = {
+        "frame_id": sparse_frame_ids,
+        "observation_count": observation_count,
+    }
     save_ply(
-        sparse_tracks_output,
+        sparse_tracks_before_ba_output,
+        result.points_3d_before_ba,
+        scalar_fields=sparse_scalar_fields,
+    )
+    save_ply(
+        sparse_tracks_after_ba_output,
         result.points_3d,
-        scalar_fields={
-            "track_id": torch.arange(
-                result.points_3d.shape[0], device=result.points_3d.device
-            ),
-            "observation_count": observation_count,
-        },
+        scalar_fields=sparse_scalar_fields,
     )
     print(f"Saved SfM result to {output}")
     print(f"Saved raw Pi3 point cloud to {raw_point_cloud_output}")
     print(f"Saved SfM-optimized point cloud to {sfm_point_cloud_output}")
-    print(f"Saved sparse BA tracks to {sparse_tracks_output}")
+    print(f"Saved sparse tracks before BA to {sparse_tracks_before_ba_output}")
+    print(f"Saved sparse tracks after BA to {sparse_tracks_after_ba_output}")
 
 
 if __name__ == "__main__":

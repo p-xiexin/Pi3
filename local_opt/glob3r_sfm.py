@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Iterable
+from typing import Dict
 
 import torch
 
@@ -48,7 +48,14 @@ class Glob3RSfM(Glob3R):
         """Decode the geometry tuple ``{T_i, X_i, C_i, m_i}`` in Eq. (1)."""
 
         backbone = self.backbone
-        required = ("point_decoder", "point_head", "camera_decoder", "camera_head")
+        required = (
+            "point_decoder",
+            "point_head",
+            "conf_decoder",
+            "conf_head",
+            "camera_decoder",
+            "camera_head",
+        )
         missing = [name for name in required if not hasattr(backbone, name)]
         if missing:
             raise RuntimeError(f"backbone cannot produce Eq. (1) geometry; missing {missing}")
@@ -69,12 +76,12 @@ class Glob3RSfM(Glob3R):
                 camera_hidden[:, backbone.patch_start_idx:], patch_height, patch_width
             ).reshape(batch, frames, 4, 4)
 
-            confidence = None
-            if hasattr(backbone, "conf_decoder") and hasattr(backbone, "conf_head"):
-                confidence_hidden = backbone.conf_decoder(geometry_tokens, xpos=positions).float()
-                confidence = backbone.conf_head(
-                    [confidence_hidden[:, backbone.patch_start_idx:]], (height, width)
-                ).reshape(batch, frames, height, width, -1)
+            confidence_hidden = backbone.conf_decoder(
+                geometry_tokens, xpos=positions
+            ).float()
+            confidence = backbone.conf_head(
+                [confidence_hidden[:, backbone.patch_start_idx:]], (height, width)
+            ).reshape(batch, frames, height, width, -1)
 
         return {
             "camera_poses": camera_poses,
@@ -88,10 +95,12 @@ class Glob3RSfM(Glob3R):
     def infer_window(
         self,
         images: torch.Tensor,
-        reference_indices: Iterable[int]
-        | Callable[[Dict[str, torch.Tensor | None]], Iterable[int]],
-    ) -> Dict[str, object]:
-        """Run Sec. 3.2 with one Eq. (1) pass and reused Eq. (2) features."""
+    ) -> tuple[
+        Dict[str, torch.Tensor | None],
+        list[torch.Tensor],
+        torch.Tensor,
+    ]:
+        """Run Eq. (1) once and return the features reused by Eq. (2)."""
 
         if images.ndim != 5:
             raise ValueError(f"images must be [B,N,3,H,W], got {tuple(images.shape)}")
@@ -105,25 +114,27 @@ class Glob3RSfM(Glob3R):
         geometry = self._predict_geometry(
             geometry_tokens, positions, frames, height, width
         )
-        selected = reference_indices(geometry) if callable(reference_indices) else reference_indices
-        references = tuple(dict.fromkeys(int(index) for index in selected))
-        if not references or any(index < 0 or index >= frames for index in references):
-            raise ValueError(f"invalid reference indices {references} for {frames} frames")
-
         patch_start = int(self.backbone.patch_start_idx)
         patch_tokens = geometry_tokens.reshape(
             batch, frames, geometry_tokens.shape[1], geometry_tokens.shape[2]
         )[:, :, patch_start:]
-        matches = {
-            reference_index: self.glob3r_matching_head(
-                patch_tokens,
-                encoder_features,
-                images,
-                reference_index=reference_index,
-            )
-            for reference_index in references
-        }
-        return {"geometry": geometry, "matches": matches}
+        return geometry, patch_tokens, encoder_features
 
+    @torch.no_grad()
+    def match_pair(
+        self,
+        patch_tokens: torch.Tensor,
+        encoder_features: list[torch.Tensor],
+        images: torch.Tensor,
+        reference_index: int,
+    ):
+        """Run Eq. (2) for one reference using cached window features."""
+
+        return self.glob3r_matching_head(
+            patch_tokens,
+            encoder_features,
+            images,
+            reference_index=reference_index,
+        )
 
 __all__ = ["Glob3RSfM"]

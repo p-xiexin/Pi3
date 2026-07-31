@@ -8,6 +8,9 @@ _EXPORTS = {
     "Glob3RSfMConfig": (".sfm", "Glob3RSfMConfig"),
     "Glob3RSfMPipeline": (".sfm", "Glob3RSfMPipeline"),
     "SfMResult": (".sfm", "SfMResult"),
+    "Tracker": (".tracker", "Tracker"),
+    "TrackerResult": (".tracker", "TrackerResult"),
+    "Tracks": (".tracker", "Tracks"),
     "bundle_adjust": (".optimization", "bundle_adjust"),
     "load_glob3r_for_sfm": (".inference", "load_glob3r_for_sfm"),
     "maximum_spanning_tree_initialization": (
@@ -19,7 +22,7 @@ _EXPORTS = {
         ".visualization",
         "save_keyframe_matching_overviews",
     ),
-    "translation_averaging": (".optimization", "translation_averaging"),
+    "opt_pose_ray": (".optimization", "opt_pose_ray"),
 }
 
 __all__ = list(_EXPORTS)
