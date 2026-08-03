@@ -267,6 +267,7 @@ def opt_pose_ray(
     observation_point: torch.Tensor,
     tracking_confidence: torch.Tensor,
     initial_camera_centers: torch.Tensor,
+    initial_points_3d: torch.Tensor,
     initial_ray_depths: torch.Tensor,
     iterations: int = 15,
     robust_delta: float = 1.0,
@@ -276,7 +277,7 @@ def opt_pose_ray(
     """Solve Glob3R Eq. (5) for centers, points, and per-observation depths."""
 
     camera_count = rotations.shape[0]
-    point_count = int(observation_point.max()) + 1
+    point_count = initial_points_3d.shape[0]
     observation_count = observation_camera.numel()
     if observation_count == 0:
         raise ValueError("translation averaging requires track observations")
@@ -285,10 +286,7 @@ def opt_pose_ray(
     world_rays = torch.einsum(
         "oij,oj->oi", rotations[observation_camera].transpose(-1, -2), normalized_rays
     )
-    points = torch.zeros(point_count, 3, device=rotations.device, dtype=rotations.dtype)
-    points.index_add_(0, observation_point, centers[observation_camera] + depths[:, None] * world_rays)
-    counts = torch.bincount(observation_point, minlength=point_count).clamp_min(1).to(points.dtype)
-    points = points / counts[:, None]
+    points = initial_points_3d.clone()
 
     # Similarity gauge: c_0 is fixed and the first observation depth fixes scale.
     center_columns = (camera_count - 1) * 3
@@ -349,7 +347,12 @@ def opt_pose_ray(
         tracking_confidence
         * robust_penalty(final_residual.square().sum(dim=-1), robust_delta)
     ).sum()
-    return MotionAveragingResult(centers, points, depths, objective)
+    return MotionAveragingResult(
+        camera_centers=centers,
+        points_3d=points,
+        ray_depths=depths,
+        objective=objective,
+    )
 
 
 def intrinsics_to_parameters(intrinsics: torch.Tensor) -> torch.Tensor:

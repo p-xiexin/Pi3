@@ -161,7 +161,6 @@ def main():
     raw_point_cloud_output = output.parent / "pi3_raw.ply"
     sfm_point_cloud_output = output.parent / "pi3_sfm.ply"
     sparse_tracks_before_ba_output = output.parent / "sparse_tracks_before_ba.ply"
-    sparse_tracks_after_ba_output = output.parent / "sparse_tracks_after_ba.ply"
     save_ply(
         raw_point_cloud_output,
         result.raw_points,
@@ -210,16 +209,10 @@ def main():
         result.points_3d_before_ba,
         scalar_fields=sparse_scalar_fields,
     )
-    save_ply(
-        sparse_tracks_after_ba_output,
-        result.points_3d,
-        scalar_fields=sparse_scalar_fields,
-    )
     print(f"Saved SfM result to {output}")
     print(f"Saved raw Pi3 point cloud to {raw_point_cloud_output}")
     print(f"Saved SfM-optimized point cloud to {sfm_point_cloud_output}")
     print(f"Saved sparse tracks before BA to {sparse_tracks_before_ba_output}")
-    print(f"Saved sparse tracks after BA to {sparse_tracks_after_ba_output}")
 
 
 if __name__ == "__main__":
