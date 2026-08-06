@@ -1,0 +1,49 @@
+project_root: ${hydra:runtime.cwd}
+kitti_root: ???
+scannet_root: ???
+
+datasets:
+  kitti:
+    _target_: datasets.kitti_dataset.KittiRawDataset
+    data_root: ${kitti_root}
+    index_file: null
+    sequences: null
+    cameras: [image_02]
+    splits: [train]
+    roots:
+      raw: null
+      depth: null
+      calibration: null
+    resolution: [[448, 224]]
+    frame_num: 4
+    transform:
+      _partial_: true
+      _target_: datasets.base.transforms.ImgToTensor
+    mode: train
+    seed: 2026
+    shuffle: false
+
+  scannet:
+    _target_: datasets.glob3r_scannet_dataset.Glob3RScannetValidationDataset
+    data_root: ${scannet_root}
+    resolution: [[448, 224]]
+    frame_num: 4
+    frame_step: 1
+    sample_seed: 2026
+    transform:
+      _partial_: true
+      _target_: datasets.base.transforms.ImgToTensor
+    mode: test
+    seed: 2026
+
+output_dir: ${project_root}/outputs/dataset_visualization
+sample_index: 0
+num_samples: 5
+reference_index: 0
+depth_threshold: 0.05
+cell_width: 240
+show: false
+
+hydra:
+  job:
+    chdir: false

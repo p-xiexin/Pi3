@@ -12,14 +12,14 @@ from pi3.models.glob3r.glob3r_training import Glob3R
 class Glob3RSfM(Glob3R):
     """Reuse one frozen Pi3 pass for Eq. (1) and multi-keyframe Eq. (2)."""
 
-    def _extract_window_features(self, images: torch.Tensor):
+    def _extract_window_features(self, Is: torch.Tensor):
         """Extract frozen Pi3 features once for every reference in the window."""
 
-        batch, frames, _, height, width = images.shape
+        batch, frames, _, height, width = Is.shape
         backbone = self.backbone
         backbone.eval()
         self._captured_encoder_features.clear()
-        normalized = (images - backbone.image_mean) / backbone.image_std
+        normalized = (Is - backbone.image_mean) / backbone.image_std
         encoded = backbone.encoder(
             normalized.reshape(batch * frames, 3, height, width), is_training=True
         )
@@ -67,50 +67,48 @@ class Glob3RSfM(Glob3R):
             point_output = backbone.point_head(
                 [point_hidden[:, backbone.patch_start_idx:]], (height, width)
             ).reshape(batch, frames, height, width, -1)
-            xy, depth = point_output.split((2, 1), dim=-1)
-            depth = depth.exp()
-            local_points = torch.cat((xy * depth, depth), dim=-1)
+            xy, D = point_output.split((2, 1), dim=-1)
+            D = D.exp()
+            Xs_C = torch.cat((xy * D, D), dim=-1)
 
             camera_hidden = backbone.camera_decoder(geometry_tokens, xpos=positions).float()
-            camera_poses = backbone.camera_head(
+            T_WCs = backbone.camera_head(
                 camera_hidden[:, backbone.patch_start_idx:], patch_height, patch_width
             ).reshape(batch, frames, 4, 4)
 
             confidence_hidden = backbone.conf_decoder(
                 geometry_tokens, xpos=positions
             ).float()
-            confidence = backbone.conf_head(
+            Cs_logits = backbone.conf_head(
                 [confidence_hidden[:, backbone.patch_start_idx:]], (height, width)
             ).reshape(batch, frames, height, width, -1)
 
         return {
-            "camera_poses": camera_poses,
-            "local_points": local_points,
-            "conf": confidence,
-            # Current Pi3 has no Pi3X metric-scale head.
-            "metric": None,
+            "camera_poses": T_WCs,
+            "local_points": Xs_C,
+            "conf": Cs_logits,
         }
 
     @torch.no_grad()
     def infer_window(
         self,
-        images: torch.Tensor,
+        Is: torch.Tensor,
     ) -> tuple[
         Dict[str, torch.Tensor | None],
-        list[torch.Tensor],
         torch.Tensor,
+        list[torch.Tensor],
     ]:
         """Run Eq. (1) once and return the features reused by Eq. (2)."""
 
-        if images.ndim != 5:
-            raise ValueError(f"images must be [B,N,3,H,W], got {tuple(images.shape)}")
-        batch, frames, _, height, width = images.shape
+        if Is.ndim != 5:
+            raise ValueError(f"Is must be [B,N,3,H,W], got {tuple(Is.shape)}")
+        batch, frames, _, height, width = Is.shape
         if batch != 1:
             raise ValueError("SfM window inference currently requires batch size one")
         if height % self.backbone.patch_size or width % self.backbone.patch_size:
             raise ValueError("image height and width must be divisible by Pi3 patch_size")
 
-        geometry_tokens, positions, encoder_features = self._extract_window_features(images)
+        geometry_tokens, positions, encoder_features = self._extract_window_features(Is)
         geometry = self._predict_geometry(
             geometry_tokens, positions, frames, height, width
         )
@@ -125,7 +123,7 @@ class Glob3RSfM(Glob3R):
         self,
         patch_tokens: torch.Tensor,
         encoder_features: list[torch.Tensor],
-        images: torch.Tensor,
+        Is: torch.Tensor,
         reference_index: int,
     ):
         """Run Eq. (2) for one reference using cached window features."""
@@ -133,7 +131,7 @@ class Glob3RSfM(Glob3R):
         return self.glob3r_matching_head(
             patch_tokens,
             encoder_features,
-            images,
+            Is,
             reference_index=reference_index,
         )
 

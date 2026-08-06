@@ -4,25 +4,26 @@ from importlib import import_module
 
 
 _EXPORTS = {
+    "Frame": (".frame", "Frame"),
+    "Frames": (".frame", "Frames"),
+    "DroidFactorGraph": (".factor_graph", "DroidFactorGraph"),
     "Glob3RSfM": (".glob3r_sfm", "Glob3RSfM"),
     "Glob3RSfMConfig": (".sfm", "Glob3RSfMConfig"),
     "Glob3RSfMPipeline": (".sfm", "Glob3RSfMPipeline"),
+    "PairMatch": (".matching", "PairMatch"),
     "SfMResult": (".sfm", "SfMResult"),
-    "Tracker": (".tracker", "Tracker"),
-    "TrackerResult": (".tracker", "TrackerResult"),
-    "Tracks": (".tracker", "Tracks"),
-    "bundle_adjust": (".optimization", "bundle_adjust"),
+    "DroidBAResult": (".droid_ba.adapter", "DroidBAResult"),
+    "optimize_droid_ba": (".droid_ba.adapter", "optimize_droid_ba"),
     "load_glob3r_for_sfm": (".inference", "load_glob3r_for_sfm"),
-    "maximum_spanning_tree_initialization": (
-        ".optimization",
-        "maximum_spanning_tree_initialization",
+    "match_batch": (".matching", "match_batch"),
+    "build_droid_factor_graph": (
+        ".factor_graph",
+        "build_droid_factor_graph",
     ),
-    "robust_rotation_averaging": (".optimization", "robust_rotation_averaging"),
     "save_keyframe_matching_overviews": (
         ".visualization",
         "save_keyframe_matching_overviews",
     ),
-    "opt_pose_ray": (".optimization", "opt_pose_ray"),
 }
 
 __all__ = list(_EXPORTS)

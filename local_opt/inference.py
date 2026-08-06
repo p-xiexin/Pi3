@@ -123,14 +123,14 @@ def load_image_sequence(
     if len(paths) < 2:
         raise RuntimeError(f"{directory} must contain at least two images")
     height, width = size
-    images = []
+    Is = []
     for path in paths:
         with Image.open(path) as source:
             image = source.convert("RGB")
             image = image.resize((width, height), resample=Image.Resampling.BICUBIC)
             array = np.asarray(image, dtype=np.float32) / 255.0
-        images.append(torch.from_numpy(array).permute(2, 0, 1))
-    return torch.stack(images), paths
+        Is.append(torch.from_numpy(array).permute(2, 0, 1))
+    return torch.stack(Is), paths
 
 
 def load_calibration(
@@ -141,7 +141,7 @@ def load_calibration(
     with Path(path).open("r", encoding="utf-8") as stream:
         config = yaml.safe_load(stream)
     fx, fy, cx, cy = map(float, config["calibration"][:4])
-    intrinsics = torch.tensor(
+    K = torch.tensor(
         [
             [fx, 0.0, cx],
             [0.0, fy, cy],
@@ -149,7 +149,7 @@ def load_calibration(
         ],
         dtype=torch.float32,
     )
-    return intrinsics, int(config["width"]), int(config["height"])
+    return K, int(config["width"]), int(config["height"])
 
 
 __all__ = [

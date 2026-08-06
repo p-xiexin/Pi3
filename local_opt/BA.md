@@ -1,163 +1,57 @@
-# Glob3R SfM 与 BA Pipeline
-
-> 论文公式沿用原编号；实现补充公式不编号。
+# Glob3R DROID-style local BA
 
 ```text
-Pi3 推理 → 关键帧选择 → dense warp → multi-view tracks → pose graph
-        → rotation averaging → translation averaging → BA → dense reconstruction
+Pi3 window inference
+  → Eq. (4) keyframe selection
+  → Eq. (2) directed PairMatch(r → t)
+  → explicit DroidFactorGraph
+  → matching overview with exact BA factors
+  → MoBA or full BA
+  → keyframe dense reconstruction
 ```
 
-**1. Pi3 推理。** 输入图像集合，预测相机位姿、局部点图、置信度和近似 metric scale：
+`Frames` 保存单窗口的 `Is/Xs_C/Cs/Ks/deltas/T_WCs`。`matching.match_batch()` 对每个 reference keyframe 运行 matching head，并为每条有向边返回：
 
-$$
-f\!\left(\{I_i\}_{i=1}^{N}\right)
-=
-\{\mathbf T_i,\mathbf X_i,\mathbf C_i,m_i\}.
-\tag{1}
-$$
+```python
+PairMatch(
+    r,             # reference frame index
+    t,             # target frame index
+    W_r2t,         # [Hm, Wm, 2], target original-pixel coordinates
+    valid_r2t,     # [Hm, Wm]
+    Q_r2t,         # [Hm, Wm]
+)
+```
 
-当前实现使用 Pi3，无 metric head，取 $m=1$。
+Warp 遵循论文 Eq. (2)：
 
-**2. 关键帧选择。** 候选帧到已有关键帧的最大有效投影数为
-
-$$
-n_t
-=
-\max_{I_r\in\mathcal K}
-\sum_{\mathbf u}
-\mathbf 1\!\left[
-\pi\!\left(\mathbf T_{t\rightarrow r}\bar{\mathbf X}_t(\mathbf u)\right)\in\mathcal D,
-\ z_{t\rightarrow r}(\mathbf u)>0,
-\ \mathbf C_t(\mathbf u)>\tau_c
-\right].
-\tag{4}
-$$
-
-对候选帧 $I_t$ 的每个像素 $\mathbf u$，先将其三维点 $\bar{\mathbf X}_t(\mathbf u)$ 变换到已有关键帧 $I_r$ 的坐标系并投影。投影位于图像范围 $\mathcal D$ 内、深度 $z_{t\rightarrow r}>0$ 且置信度 $\mathbf C_t(\mathbf u)>\tau_c$ 时，该像素计为有效投影。
-
-求和得到 $I_t$ 与关键帧 $I_r$ 的有效重叠数，再对所有 $I_r\in\mathcal K$ 取最大值 $n_t$。最终 reference set 为
-
-$$
-\mathcal R
-=
-\{0\}
-\cup
-\left\{
-t\in\{1,\ldots,N-1\}
-\ \middle|\
-\frac{n_t}{HW}<0.2
-\right\}.
-$$
-
-$\mathcal R$ 作为后续 dense matching 的关键帧索引集合。
-
-论文窗口长度为 20，步长为 10；当前实现处理 single window。
-
-**3. Dense matching。** 对关键帧 $I_a \in \mathcal R$，matching head 输出到其余帧 $\mathcal B$ 的 warp 和 confidence：
-
-$$
-\left(\mathbf W^{a\rightarrow\mathcal B},\mathbf p^{a\rightarrow\mathcal B}\right)
-=
-\operatorname{DPT}_{\mathrm{match}}\!\left(
-\operatorname{Dec}_{\mathrm{match}}(\mathbf H),a
-\right).
+\[
+W^{r\rightarrow t}(p_r)=p_t.
 \tag{2}
-$$
+\]
 
-每个关键帧采样 512 个高置信度像素，KITTI 采样 256 个；warp confidence 低于 0.6 的 observation 被移除。
+`W_r2t` 全程保持浮点坐标。`factor_graph.build_droid_factor_graph()` 将其 reference 空间网格双线性重采样到 DROID 的 stride-8 网格，坐标值只连续除以 8，不做 `round()`。目标帧置信度也在连续的 $p_t$ 上使用双线性 `grid_sample`：
 
-**4. Multi-view tracks 与 observation set。**
-
-$$
-\mathcal T_j
+\[
+C_t^{r\rightarrow t}(p_r)
 =
-\left\{
-(i,\mathbf u_{ij},\omega_{ij})
-\mid i\in\mathcal V_j
-\right\},
-\qquad
-\mathcal O
+C_t\!\left(W^{r\rightarrow t}(p_r)\right).
+\]
+
+每条稠密因子的权重由 `Q_r2t`、有效范围、reference/target Pi3 confidence 和有效深度共同确定。matching 总览只在 `Images` 行叠加最终 BA factor：reference 使用 DROID 规则二维 stride-8 source grid，并绘制当前页面所有 outgoing edges 的有效并集；每个 target 列只使用本 edge 的 `graph.weight > 0` mask，在 `graph.target * stride` 的亚像素位置绘制同色点。`Warp` 与 `Conf` 行保持原始 matching head 输出不变。每个 target 列顶部标注 edge 和实际 factor 数量。`sfm.py` 在调用 solver 前显式构建 factor graph 和可视化 matching；adapter 只负责 SE(3) 表示转换、调用 vendored `MoBA/BA` 和返回结果。
+
+`moba` 固定 Pi3 depth，只更新相机位姿；`ba` 联合更新相机位姿和 keyframe inverse depth。两种模式均固定内参与畸变，vendored `ba.py`、`chol.py`、`projective_ops.py` 保持上游源码不变。
+
+full BA 的 stride-8 深度通过比例场反馈到 Pi3 全分辨率深度：
+
+\[
+\frac{D_{\mathrm{opt}}}{D_{\mathrm{init}}}
 =
-\left\{
-(i,j)
-\mid j=1,\ldots,J,\ i\in\mathcal V_j
-\right\}.
-$$
+\frac{d_{\mathrm{init}}}{d_{\mathrm{opt}}},
+\qquad d=\frac{1}{D}.
+\]
 
-$j$ 是 track 及其 sparse point $\mathbf X_j$ 的编号；$\mathcal V_j$ 是有效观测帧集合；$\mathbf u_{ij}$ 和 $\omega_{ij}$ 是对应的像素坐标与 tracking confidence。$\mathcal O$ 是公式 (5)、(6) 使用的全部 camera-point observations。
+`sfm.py` 双线性上采样该比例场并乘回 Pi3 depth，避免直接上采样低分辨率 depth 导致细节平滑。
 
-**5. Translation averaging。** 固定旋转，联合优化所有 camera centers、sparse points 和 observation depths：
+优化前先把所有 Pi3 `T_WC` 变换到首帧坐标系，因此 `pi3_raw.ply` 与 `pi3_sfm.ply` 使用同一个世界坐标系。两份点云都只融合 Eq. (4) 选出的 keyframes。
 
-$$
-\min_{\{\mathbf c_i\},\{\mathbf X_j\},\{d_{ij}\}}
-\sum_{(i,j)\in\mathcal O}
-\omega_{ij}\rho\!\left(
-\left\|\mathbf X_j-
-\left(\mathbf c_i+d_{ij}\mathbf R_i^{\top}\mathbf v_{ij}\right)
-\right\|_2^2
-\right).
-\tag{5}
-$$
-
-$\mathcal O$ 包含全部有效 track observations。
-
-**6. Bundle adjustment。** 以 motion averaging 结果初始化，在 $\mathcal O$ 上优化相机位姿、sparse points，以及启用时的内参与畸变：
-
-$$
-\min_{\{\mathbf T_i\},\{\mathbf X_j\},\{\mathbf K_i\},\{\boldsymbol\delta_i\}}
-\sum_{(i,j)\in\mathcal O}
-\omega_{ij}\rho\!\left(
-\left\|
-\pi\!\left(\mathbf K_i,\boldsymbol\delta_i,\mathbf T_i,\mathbf X_j\right)
--\mathbf u_{ij}
-\right\|_2^2
-\right).
-\tag{6}
-$$
-
-BA 优化所有具有有效 observations 的帧；关键帧仅作为 track anchor 和 dense reconstruction 来源。当前实现固定 camera 0 和 point 0；相机标定默认固定。
-
-**7. Dense reconstruction。** 对每个关键帧 $i$，由 BA sparse depth 和 predicted depth 计算 ratios：
-
-$$
-z_{ij}^{\mathrm{BA}}
-=
-[\mathbf T_i^{w2c}\mathbf X_j]_z,
-\qquad
-r_{ij}
-=
-\frac{z_{ij}^{\mathrm{BA}}}{D_i^{\mathrm{pred}}(\mathbf u_{ij})}.
-$$
-
-RANSAC 估计每个关键帧的尺度并缩放深度：
-
-$$
-s_i=\operatorname{RANSAC}(\{r_{ij}\}),
-\qquad
-D_i^{\mathrm{scaled}}=s_iD_i^{\mathrm{pred}}.
-$$
-
-优化后的内参、畸变和位姿用于反投影与融合：
-
-$$
-\mathbf X_i^{\mathrm{dense}}(\mathbf u)
-=
-(\mathbf T_i^{w2c})^{-1}
-\pi^{-1}\!\left(
-\mathbf K_i,\boldsymbol\delta_i,
-\mathbf u,D_i^{\mathrm{scaled}}(\mathbf u)
-\right).
-$$
-
-## 当前实现的问题：点云分层
-
-- 最终 dense cloud 仅由关键帧生成；四个关键帧对应四组 dense points。
-- BA 优化 sparse points 和所有有效相机位姿；dense depths 不参与公式 (6)。
-- 每个关键帧独立估计 $s_i$，不同关键帧之间没有尺度一致性约束。
-- 单一 $s_i$ 只能校正整体尺度，不能校正局部深度形变和平面倾斜。
-- 当前 RANSAC 仅要求至少两个有效 ratios，未设置最小 inlier 数、inlier fraction 和 MAD 上限。
-- 当前 track IDs 按关键帧独立创建，未执行 cross-reference track merging。
-- 当前 pose graph 显式包含 reference-target edges，未由完整 track 补充 target-target edges。
-- 当前使用 Pi3 且 $m=1$，没有 Pi3X metric scale、overlap association 和 loop constraints。
-- Sparse cloud 一致而 dense cloud 分层时，误差位于 scale recovery 或 dense back-projection。
-- Sparse cloud 在 BA 前已分层时，误差位于 tracks、pose initialization 或 translation averaging。
+当前实现是 DROID 风格的稠密 MoBA/full BA 路径，不构造论文 Eq. (5)–(6) 的 sparse tracks、landmarks 或完整 Glob3R BA。
