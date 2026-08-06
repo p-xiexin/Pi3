@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from .frame import Frames
 from .matching import PairMatch
 
+MIN_EDGE_COVISIBILITY = 0.05
+
 
 @dataclass
 class DroidFactorGraph:
@@ -17,6 +19,8 @@ class DroidFactorGraph:
 
     rs: torch.Tensor          # [E]
     ts: torch.Tensor          # [E]
+    match_indices: torch.Tensor  # [E], indices into the input PairMatch sequence
+    covisibility: torch.Tensor   # [E]
     target: torch.Tensor      # [B, E, h, w, 2]
     weight: torch.Tensor      # [B, E, h, w, 2]
     disps: torch.Tensor       # [B, N, h, w]
@@ -35,6 +39,9 @@ def build_droid_factor_graph(
     warp_confidence_threshold: float = 0.6,
 ) -> DroidFactorGraph:
     """Convert Eq. (2) matches into the exact dense DROID factor tensors."""
+
+    if not matches:
+        raise RuntimeError("BA requires at least one directed match")
 
     device = frames.Xs_C.device
     dtype = frames.Xs_C.dtype
@@ -58,6 +65,7 @@ def build_droid_factor_graph(
     ts = torch.tensor(
         [match.t for match in matches], device=device, dtype=torch.long
     )
+    match_indices = torch.arange(len(matches), device=device)
     W_r2t = torch.stack([match.W_r2t for match in matches])
     valid_r2t = torch.stack([match.valid_r2t for match in matches])
     Q_r2t = torch.stack([match.Q_r2t for match in matches])
@@ -121,6 +129,21 @@ def build_droid_factor_graph(
     valid_r2t &= Cs_t > depth_confidence_threshold
     valid_r2t &= Q_r2t >= warp_confidence_threshold
 
+    # A directed edge is useful only when enough of the reference grid is
+    # jointly supported by geometry and the final Glob3R confidence mask.
+    # Keeping very sparse edges introduces weakly constrained cameras into BA.
+    edge_covisibility = valid_r2t.float().mean(dim=(1, 2))
+    edge_mask = edge_covisibility >= MIN_EDGE_COVISIBILITY
+    if not edge_mask.any():
+        raise RuntimeError("No match edge passes the BA covisibility threshold")
+    rs = rs[edge_mask]
+    ts = ts[edge_mask]
+    match_indices = match_indices[edge_mask]
+    edge_covisibility = edge_covisibility[edge_mask]
+    W_r2t = W_r2t[edge_mask]
+    Q_r2t = Q_r2t[edge_mask]
+    valid_r2t = valid_r2t[edge_mask]
+
     # [E, h, w, 2] -> [B, E, h, w, 2]. Coordinate values are continuously
     # scaled into DROID's grid and never rounded.
     target = torch.where(
@@ -150,6 +173,8 @@ def build_droid_factor_graph(
     return DroidFactorGraph(
         rs=rs,
         ts=ts,
+        match_indices=match_indices,
+        covisibility=edge_covisibility,
         target=target,
         weight=weight,
         disps=disps,
@@ -159,4 +184,8 @@ def build_droid_factor_graph(
     )
 
 
-__all__ = ["DroidFactorGraph", "build_droid_factor_graph"]
+__all__ = [
+    "DroidFactorGraph",
+    "MIN_EDGE_COVISIBILITY",
+    "build_droid_factor_graph",
+]

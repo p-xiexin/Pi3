@@ -7,6 +7,8 @@ _EXPORTS = {
     "Frame": (".frame", "Frame"),
     "Frames": (".frame", "Frames"),
     "DroidFactorGraph": (".factor_graph", "DroidFactorGraph"),
+    "DepthRatioFilterConfig": (".filter", "DepthRatioFilterConfig"),
+    "DepthRatioFilterResult": (".filter", "DepthRatioFilterResult"),
     "Glob3RSfM": (".glob3r_sfm", "Glob3RSfM"),
     "Glob3RSfMConfig": (".sfm", "Glob3RSfMConfig"),
     "Glob3RSfMPipeline": (".sfm", "Glob3RSfMPipeline"),
@@ -19,6 +21,11 @@ _EXPORTS = {
     "build_droid_factor_graph": (
         ".factor_graph",
         "build_droid_factor_graph",
+    ),
+    "filter_depth_ratios": (".filter", "filter_depth_ratios"),
+    "source_support_from_factors": (
+        ".filter",
+        "source_support_from_factors",
     ),
     "save_keyframe_matching_overviews": (
         ".visualization",

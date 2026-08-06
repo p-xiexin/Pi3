@@ -11,7 +11,11 @@ import torch.nn.functional as F
 
 from pi3.utils.geometry import depth_edge
 
-from .factor_graph import DroidFactorGraph, build_droid_factor_graph
+from .factor_graph import (
+    MIN_EDGE_COVISIBILITY,
+    DroidFactorGraph,
+    build_droid_factor_graph,
+)
 from .frame import Frames
 from .matching import PairMatch, match_batch
 from .visualization import save_keyframe_matching_overviews
@@ -22,8 +26,8 @@ class Glob3RSfMConfig:
     """Appendix C.1 defaults and local solver controls."""
 
     keyframe_projection_threshold: float = 0.2
-    depth_confidence_threshold: float = 0.1
-    warp_confidence_threshold: float = 0.6
+    depth_confidence_threshold: float = 0.4
+    warp_confidence_threshold: float = 0.8
     droid_solver: str = "moba"
     droid_iterations: int = 12
     droid_downsample: int = 8
@@ -210,26 +214,41 @@ class Glob3RSfMPipeline:
             frames,
             keyframes,
         )
+
+        # Keep the first line for all-frame BA. Swap these two lines to compare
+        # keyframe-only BA with exactly the same matching and solver code.
+        # factor_matches = matches
+        factor_matches = [match for match in matches if match.t in keyframes]
+        ba_scope = "all frames" if factor_matches is matches else "keyframes only"
+        print(f"BA frame scope: {ba_scope}")
         factor_graph = build_droid_factor_graph(
             frames,
-            matches,
+            factor_matches,
             stride=self.config.droid_downsample,
             depth_confidence_threshold=self.config.depth_confidence_threshold,
             warp_confidence_threshold=self.config.warp_confidence_threshold,
         )
         factor_counts = (factor_graph.weight[0, ..., 0] > 0).sum(dim=(1, 2))
-        print("DROID factor graph:")
-        for r, t, count in zip(
+        print(
+            "DROID factor graph: retained "
+            f"{factor_graph.rs.numel()}/{len(factor_matches)} edges "
+            f"with covisibility >= {MIN_EDGE_COVISIBILITY:.0%}"
+        )
+        for r, t, count, covisibility in zip(
             factor_graph.rs.tolist(),
             factor_graph.ts.tolist(),
             factor_counts.tolist(),
+            factor_graph.covisibility.tolist(),
         ):
-            print(f"  {r} -> {t}: factors={count}")
+            print(
+                f"  {r} -> {t}: factors={count}, "
+                f"covisibility={covisibility:.2%}"
+            )
         if visualization_dir is not None:
             paths = save_keyframe_matching_overviews(
                 visualization_dir,
                 frames.Is,
-                matches,
+                factor_matches,
                 factor_graph,
             )
             print(f"Saved {len(paths)} matching overview(s) to {visualization_dir}")

@@ -107,12 +107,16 @@ def render_keyframe_matching_overview(
     blank = Image.new("RGB", (cell_width, cell_height), "white")
     low_height, low_width = graph.target.shape[2:4]
 
-    # All outgoing edges share the same two-dimensional source factor grid.
-    # The reference panel shows the union for this page; each target panel
-    # shows only its own final graph.weight > 0 support.
-    page_valid = graph.weight[0, edge_indices, ..., 0] > 0
-    reference_valid = page_valid.any(dim=0)
-    ys_r, xs_r = torch.nonzero(reference_valid, as_tuple=True)
+    # Show the complete regular source grid on the reference image. Confidence
+    # filtering belongs to each target correspondence and must not remove the
+    # query locations that explain the color-to-position mapping.
+    ys_r, xs_r = torch.meshgrid(
+        torch.arange(low_height),
+        torch.arange(low_width),
+        indexing="ij",
+    )
+    ys_r = ys_r.flatten()
+    xs_r = xs_r.flatten()
     reference_indices = ys_r * low_width + xs_r
     ps_r = torch.stack((xs_r, ys_r), dim=-1).float() * graph.stride
     reference_panel = _draw_points(
@@ -130,7 +134,7 @@ def render_keyframe_matching_overview(
     for edge_index in edge_indices:
         edge = int(edge_index)
         target_index = int(graph.ts[edge])
-        match = matches[edge]
+        match = matches[int(graph.match_indices[edge])]
         valid = graph.weight[0, edge, ..., 0] > 0
         ys_r, xs_r = torch.nonzero(valid, as_tuple=True)
         source_indices = ys_r * low_width + xs_r
@@ -232,6 +236,8 @@ def save_keyframe_matching_overviews(
     graph = DroidFactorGraph(
         rs=graph.rs.detach().cpu(),
         ts=graph.ts.detach().cpu(),
+        match_indices=graph.match_indices.detach().cpu(),
+        covisibility=graph.covisibility.detach().float().cpu(),
         target=graph.target.detach().float().cpu(),
         weight=graph.weight.detach().float().cpu(),
         disps=graph.disps.detach().float().cpu(),

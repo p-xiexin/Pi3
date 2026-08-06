@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument(
         "--droid-solver",
         choices=("moba", "ba"),
-        default="moba",
+        default="ba",
         help="optimize poses only (moba) or poses and keyframe depth (ba)",
     )
     parser.add_argument(

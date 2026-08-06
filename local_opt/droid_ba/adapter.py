@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn.functional as F
@@ -110,21 +110,43 @@ def optimize_droid_ba(
     if solver not in {"ba", "moba"}:
         raise ValueError("solver must be 'ba' or 'moba'")
 
-    T_CWs = torch.linalg.inv(T_WCs)
+    # Compact the cameras connected by retained factors before optimization.
+    # Thus non-contiguous keyframes do not leave unconstrained pose variables
+    # between them, while all-frame BA follows the identical solver path.
+    frame_indices = torch.unique(torch.cat((graph.rs, graph.ts)), sorted=True)
+    frame_map = torch.full(
+        (T_WCs.shape[0],),
+        -1,
+        device=T_WCs.device,
+        dtype=torch.long,
+    )
+    frame_map[frame_indices] = torch.arange(
+        frame_indices.numel(), device=T_WCs.device
+    )
+    local_graph = replace(
+        graph,
+        rs=frame_map[graph.rs],
+        ts=frame_map[graph.ts],
+        disps=graph.disps[:, frame_indices],
+        intrinsics=graph.intrinsics[:, frame_indices],
+    )
+
+    T_CWs = torch.linalg.inv(T_WCs[frame_indices])
     pose_vectors = torch.cat(
         (T_CWs[:, :3, 3], _matrix_to_xyzw(T_CWs[:, :3, :3])), dim=-1
     ).unsqueeze(dim=0)
     poses = SE3.InitFromVec(pose_vectors)
-    disps = graph.disps.clone()
+    disps = local_graph.disps.clone()
     disps_init = disps.clone()
-    source_indices = torch.unique(graph.rs)
+    source_indices = torch.unique(local_graph.rs)
     fixed_poses = 2 if solver == "ba" else 1
     low_height, low_width = graph.disps.shape[-2:]
 
     print(
         f"DROID {solver.upper()} input: "
-        f"cameras={T_WCs.shape[0]}, edges={graph.rs.numel()}, "
-        f"source_frames={source_indices.tolist()}, "
+        f"cameras={frame_indices.numel()}/{T_WCs.shape[0]}, "
+        f"frames={frame_indices.tolist()}, edges={local_graph.rs.numel()}, "
+        f"source_frames={frame_indices[source_indices].tolist()}, "
         f"resolution={low_height}x{low_width}, iterations={iterations}, "
         f"fixed_poses={fixed_poses}, depth_update={solver == 'ba'}"
     )
@@ -132,13 +154,15 @@ def optimize_droid_ba(
         _, initial_valid = _projective_ops.projective_transform(
             poses,
             disps,
-            graph.intrinsics,
-            graph.rs,
-            graph.ts,
+            local_graph.intrinsics,
+            local_graph.rs,
+            local_graph.ts,
         )
-        fixed_support = initial_valid * graph.weight.any(dim=-1, keepdim=True)
+        fixed_support = initial_valid * local_graph.weight.any(
+            dim=-1, keepdim=True
+        )
         initial_error, initial_rmse, initial_valid_ratio = _fixed_support_metrics(
-            poses, disps, graph, fixed_support
+            poses, disps, local_graph, fixed_support
         )
         print(
             f"DROID {solver.upper()} iteration 0: "
@@ -149,30 +173,30 @@ def optimize_droid_ba(
         for iteration in range(iterations):
             if solver == "ba":
                 poses, disps = BA(
-                    graph.target,
-                    graph.weight,
-                    graph.damping,
+                    local_graph.target,
+                    local_graph.weight,
+                    local_graph.damping,
                     poses,
                     disps,
-                    graph.intrinsics,
-                    graph.rs,
-                    graph.ts,
+                    local_graph.intrinsics,
+                    local_graph.rs,
+                    local_graph.ts,
                     fixedp=fixed_poses,
                 )
             else:
                 poses = MoBA(
-                    graph.target,
-                    graph.weight,
-                    graph.damping,
+                    local_graph.target,
+                    local_graph.weight,
+                    local_graph.damping,
                     poses,
                     disps,
-                    graph.intrinsics,
-                    graph.rs,
-                    graph.ts,
+                    local_graph.intrinsics,
+                    local_graph.rs,
+                    local_graph.ts,
                     fixedp=fixed_poses,
                 )
             final_error, final_rmse, final_valid_ratio = _fixed_support_metrics(
-                poses, disps, graph, fixed_support
+                poses, disps, local_graph, fixed_support
             )
             print(
                 f"DROID {solver.upper()} iteration {iteration + 1}: "
@@ -196,9 +220,15 @@ def optimize_droid_ba(
         f"DROID {solver.upper()} error: {float(initial_error):.6g} -> "
         f"{float(final_error):.6g}"
     )
+    T_WCs_optimized = T_WCs.clone()
+    T_WCs_optimized[frame_indices] = torch.linalg.inv(
+        poses.matrix().squeeze(dim=0)
+    )
+    disps_optimized = graph.disps.squeeze(dim=0).clone()
+    disps_optimized[frame_indices] = disps.squeeze(dim=0)
     return DroidBAResult(
-        T_WCs=torch.linalg.inv(poses.matrix().squeeze(dim=0)),
-        disps=disps.squeeze(dim=0),
+        T_WCs=T_WCs_optimized,
+        disps=disps_optimized,
         initial_error=initial_error,
         final_error=final_error,
     )
