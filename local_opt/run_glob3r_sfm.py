@@ -33,12 +33,6 @@ def parse_args():
     parser.add_argument("--width", type=int, default=448)
     parser.add_argument("--device", default="cuda:1")
     parser.add_argument(
-        "--droid-solver",
-        choices=("moba", "ba"),
-        default="ba",
-        help="optimize poses only (moba) or poses and keyframe depth (ba)",
-    )
-    parser.add_argument(
         "--calibration",
         required=True,
         help="fixed camera calibration YAML",
@@ -101,7 +95,6 @@ def main():
     )
     config = Glob3RSfMConfig(
         keyframe_projection_threshold=args.keyframe_threshold,
-        droid_solver=args.droid_solver,
     )
     pipeline = Glob3RSfMPipeline(model, config)
     matching_output = output.parent / "matching"
@@ -125,34 +118,34 @@ def main():
 
     torch.save(
         {
-            "droid_solver": args.droid_solver,
             "image_paths": [str(path) for path in paths],
             "world_to_camera": result.T_CWs.cpu(),
             "camera_to_world": result.T_WCs.cpu(),
             "intrinsics": result.Ks.cpu(),
             "distortion": result.deltas.cpu(),
             "keyframes": result.keyframes,
-            "match_reference": torch.tensor(
-                [match.r for match in result.matches]
-            ),
-            "match_target": torch.tensor(
-                [match.t for match in result.matches]
-            ),
+            "track_references": result.tracks.rs.cpu(),
+            "track_anchor_points": result.tracks.Xs_Cr.cpu(),
+            "track_observations": result.tracks.us.cpu(),
+            "track_mask": result.tracks.mask.cpu(),
+            "track_weights": result.tracks.ws.cpu(),
+            "track_inliers": result.track_inliers.cpu(),
+            "sparse_points_before_optimization": result.Xs_W0.cpu(),
+            "sparse_points": result.Xs_W.cpu(),
             "pi3_raw_points": result.raw_Ps_W.cpu(),
             "pi3_raw_colors": result.raw_RGBs.cpu(),
             "pi3_raw_frame_ids": result.raw_frame_ids.cpu(),
             "pi3_sfm_points": result.dense_Ps_W.cpu(),
             "pi3_sfm_colors": result.dense_RGBs.cpu(),
             "pi3_sfm_frame_ids": result.dense_frame_ids.cpu(),
-            "optimized_disparities": result.disps.cpu(),
-            "optimized_depths": result.optimized_frames.Xs_C[..., 2].cpu(),
-            "initial_optimization_error": result.initial_optimization_error.cpu(),
-            "optimization_error": result.optimization_error.cpu(),
+            "eq5_loss": result.eq5_loss.cpu(),
+            "eq6_loss": result.eq6_loss.cpu(),
         },
         output,
     )
     raw_point_cloud_output = output.parent / "pi3_raw.ply"
     sfm_point_cloud_output = output.parent / "pi3_sfm.ply"
+    sparse_point_cloud_output = output.parent / "sparse_tracks.ply"
     save_ply(
         raw_point_cloud_output,
         result.raw_Ps_W,
@@ -165,9 +158,22 @@ def main():
         result.dense_RGBs,
         {"frame_id": result.dense_frame_ids},
     )
+    observation_count = result.tracks.mask.sum(dim=0)
+    observation_count[~result.track_inliers] = -1
+    save_ply(
+        sparse_point_cloud_output,
+        result.Xs_W,
+        scalar_fields={
+            "track_id": torch.arange(
+                result.Xs_W.shape[0], device=result.Xs_W.device
+            ),
+            "observation_count": observation_count,
+        },
+    )
     print(f"Saved SfM result to {output}")
     print(f"Saved raw Pi3 point cloud to {raw_point_cloud_output}")
     print(f"Saved SfM-optimized point cloud to {sfm_point_cloud_output}")
+    print(f"Saved optimized sparse tracks to {sparse_point_cloud_output}")
 
 
 if __name__ == "__main__":

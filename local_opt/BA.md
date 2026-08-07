@@ -1,57 +1,48 @@
-# Glob3R DROID-style local BA
+# Glob3R 单窗口优化
 
 ```text
-Pi3 window inference
-  → Eq. (4) keyframe selection
-  → Eq. (2) directed PairMatch(r → t)
-  → explicit DroidFactorGraph
-  → matching overview with exact BA factors
-  → MoBA or full BA
+Pi3 Eq. (1) geometry
+  → Eq. (4) keyframes
+  → Eq. (2) dense warps
+  → Tracks(rs, Xs_Cr, us, mask, ws)
+  → Eq. (5) ray-consistency optimization
+  → Eq. (6) sparse bundle adjustment
   → keyframe dense reconstruction
 ```
 
-`Frames` 保存单窗口的 `Is/Xs_C/Cs/Ks/deltas/T_WCs`。`matching.match_batch()` 对每个 reference keyframe 运行 matching head，并为每条有向边返回：
-
-```python
-PairMatch(
-    r,             # reference frame index
-    t,             # target frame index
-    W_r2t,         # [Hm, Wm, 2], target original-pixel coordinates
-    valid_r2t,     # [Hm, Wm]
-    Q_r2t,         # [Hm, Wm]
-)
-```
-
-Warp 遵循论文 Eq. (2)：
+`Tracks` 使用 `[S,P]` 组织多视图观测。第 `j` 列始终表示同一条 track：
 
 \[
-W^{r\rightarrow t}(p_r)=p_t.
-\tag{2}
+u_i^j=\texttt{us[i,j]},\qquad
+\omega_{ij}=\texttt{ws[i,j]}.
 \]
 
-`W_r2t` 全程保持浮点坐标。`factor_graph.build_droid_factor_graph()` 将其 reference 空间网格双线性重采样到 DROID 的 stride-8 网格，坐标值只连续除以 8，不做 `round()`。目标帧置信度也在连续的 $p_t$ 上使用双线性 `grid_sample`：
+`rs[j]` 是 track 的 keyframe，`Xs_Cr[j]` 是 Pi3 在该 keyframe 坐标系中预测的局部点。共享世界点不通过多帧三角化初始化，而是严格使用 anchor point：
 
 \[
-C_t^{r\rightarrow t}(p_r)
-=
-C_t\!\left(W^{r\rightarrow t}(p_r)\right).
+X_j^0=T_{WC,r_j}X_{r_j}(u_{r_j}^j).
 \]
 
-每条稠密因子的权重由 `Q_r2t`、有效范围、reference/target Pi3 confidence 和有效深度共同确定。matching 总览只在 `Images` 行叠加最终 BA factor：reference 使用 DROID 规则二维 stride-8 source grid，并绘制当前页面所有 outgoing edges 的有效并集；每个 target 列只使用本 edge 的 `graph.weight > 0` mask，在 `graph.target * stride` 的亚像素位置绘制同色点。`Warp` 与 `Conf` 行保持原始 matching head 输出不变。每个 target 列顶部标注 edge 和实际 factor 数量。`sfm.py` 在调用 solver 前显式构建 factor graph 和可视化 matching；adapter 只负责 SE(3) 表示转换、调用 vendored `MoBA/BA` 和返回结果。
-
-`moba` 固定 Pi3 depth，只更新相机位姿；`ba` 联合更新相机位姿和 keyframe inverse depth。两种模式均固定内参与畸变，vendored `ba.py`、`chol.py`、`projective_ops.py` 保持上游源码不变。
-
-full BA 的 stride-8 深度通过比例场反馈到 Pi3 全分辨率深度：
+其他帧的 Pi3 point map 不会为同一条 track 创建额外三维变量，只提供 Glob3R warp 得到的二维观测。Eq. (5) 优化相机中心、共享点和逐观测 ray depth：
 
 \[
-\frac{D_{\mathrm{opt}}}{D_{\mathrm{init}}}
-=
-\frac{d_{\mathrm{init}}}{d_{\mathrm{opt}}},
-\qquad d=\frac{1}{D}.
+\min_{\{c_i\},\{X_j\},\{d_{ij}\}}
+\sum_{(i,j)\in\mathcal O}
+\omega_{ij}\rho\!\left(
+\left\|X_j-\left(c_i+d_{ij}R_i^\top v_{ij}\right)\right\|_2^2
+\right).
+\tag{5}
 \]
 
-`sfm.py` 双线性上采样该比例场并乘回 Pi3 depth，避免直接上采样低分辨率 depth 导致细节平滑。
+Eq. (6) 继续优化同一组 `X_j` 与相机位姿：
 
-优化前先把所有 Pi3 `T_WC` 变换到首帧坐标系，因此 `pi3_raw.ply` 与 `pi3_sfm.ply` 使用同一个世界坐标系。两份点云都只融合 Eq. (4) 选出的 keyframes。
+\[
+\min_{\{T_i\},\{X_j\}}
+\sum_{(i,j)\in\mathcal O}
+\omega_{ij}\rho\!\left(
+\left\|\pi(K_i,\delta_i,T_i,X_j)-u_i^j\right\|_2^2
+\right).
+\tag{6}
+\]
 
-当前实现是 DROID 风格的稠密 MoBA/full BA 路径，不构造论文 Eq. (5)–(6) 的 sparse tracks、landmarks 或完整 Glob3R BA。
+后端按 DROID BA 的结构拆为 `backend/proj.py`、`backend/chol.py` 和 `backend/ba.py`。Eq. (5) 在线性化时解析消去 $d_{ij}$，Eq. (6) 使用 `lietorch.SE3.retr()` 更新位姿；两者都通过解析 Jacobian、block normal equations、Schur complement 和 Cholesky 求解。状态仍是 Glob3R 的共享 $X_j$，没有恢复 DROID 的逆深度图。当前固定内参与零畸变。
