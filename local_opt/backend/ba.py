@@ -6,12 +6,17 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from lietorch import SE3
 
 from local_opt.matching import Tracks
 
 from . import proj
 from .chol import schur_solve
+from .gauge import (
+    camera_centers,
+    center_scale_residual_jacobian,
+    pose_scale_residual_jacobian,
+    select_baseline_scale_gauge,
+)
 
 
 @dataclass(frozen=True)
@@ -68,19 +73,24 @@ def opt_pose_ray(
     jj: torch.Tensor,
     confidence: torch.Tensor,
     iterations: int = 15,
+    scale_prior_weight: float = 1.0e3,
 ) -> Eq5Result:
     """Glob3R Eq. (5) with DROID-style block Gauss-Newton."""
 
+    if scale_prior_weight <= 0:
+        raise ValueError("scale_prior_weight must be positive")
     cs = cs0.clone()
     Xs_W = Xs_W0.clone()
     rays_W = torch.einsum("oij,oj->oi", Rs[ii].transpose(-1, -2), vs)
 
     fixedp = 1
-    fixedx = 1
+    fixedx = 0
     P = cs.shape[0] - fixedp
     M = Xs_W.shape[0] - fixedx
     ci = ii - fixedp
     xj = jj - fixedx
+    scale_gauge = select_baseline_scale_gauge(cs0)
+    scale_ci = scale_gauge.camera_index - fixedp
 
     for _ in range(iterations):
         # 1. Compute Eq. (5) residuals, Jacobians, and robust weights.
@@ -106,12 +116,20 @@ def opt_pose_ray(
         v = safe_scatter_add_vec(vc, ci, P)
         w = safe_scatter_add_vec(vx, xj, M)
 
+        # Fix only one scalar scale degree of freedom. All coordinates of all
+        # 3D points remain active optimization variables.
+        scale_error, scale_J = center_scale_residual_jacobian(cs, scale_gauge)
+        H[scale_ci, scale_ci] += scale_prior_weight * torch.outer(
+            scale_J, scale_J
+        )
+        v[scale_ci] += scale_prior_weight * scale_J * (-scale_error)
+
         # 3. Eliminate shared points with the Schur complement.
         dc, dX = schur_solve(H, E, C, v, w)
 
         # 4. Apply the additive retraction for centers and shared points.
         cs[fixedp:] += dc
-        Xs_W[fixedx:] += dX
+        Xs_W += dX
 
     offsets = Xs_W[jj] - cs[ii]
     ds = (offsets * rays_W).sum(dim=-1) / rays_W.square().sum(dim=-1)
@@ -128,9 +146,12 @@ def bundle_adjust(
     deltas: torch.Tensor,
     tracks: Tracks,
     iterations: int = 20,
+    scale_prior_weight: float = 1.0e3,
 ) -> Eq6Result:
     """Glob3R Eq. (6) with LieTorch retraction and Schur BA."""
 
+    if scale_prior_weight <= 0:
+        raise ValueError("scale_prior_weight must be positive")
     ii, jj = torch.nonzero(tracks.mask, as_tuple=True)
     target = tracks.us[ii, jj]
     confidence = tracks.ws[ii, jj]
@@ -138,11 +159,13 @@ def bundle_adjust(
     Xs_W = Xs_W0.clone()
 
     fixedp = 1
-    fixedx = 1
+    fixedx = 0
     P = T_CWs0.shape[0] - fixedp
     M = Xs_W.shape[0] - fixedx
     ci = ii - fixedp
     xj = jj - fixedx
+    scale_gauge = select_baseline_scale_gauge(camera_centers(T_CWs0))
+    scale_ci = scale_gauge.camera_index - fixedp
 
     for _ in range(iterations):
         # 1. Compute Eq. (6) projections, Jacobians, and residuals.
@@ -170,12 +193,22 @@ def bundle_adjust(
         v = safe_scatter_add_vec(vc, ci, P)
         w = safe_scatter_add_vec(vx, xj, M)
 
+        # The first pose fixes the SE(3) gauge. This one scalar baseline factor
+        # fixes only scale; no complete 3D point is frozen.
+        scale_error, scale_J = pose_scale_residual_jacobian(
+            T_CWs.matrix(), scale_gauge
+        )
+        H[scale_ci, scale_ci] += scale_prior_weight * torch.outer(
+            scale_J, scale_J
+        )
+        v[scale_ci] += scale_prior_weight * scale_J * (-scale_error)
+
         # 3. Eliminate shared points with the Schur complement.
         dT, dX = schur_solve(H, E, C, v, w)
 
         # 4. Retract SE(3) poses and update shared world points.
         T_CWs = pose_retr(T_CWs, dT, fixedp=fixedp)
-        Xs_W[fixedx:] += dX
+        Xs_W += dX
 
     coords, valid = proj.projective_transform(
         T_CWs, Xs_W, Ks, deltas, ii, jj
@@ -229,7 +262,9 @@ def _matrix_to_xyzw(Rs: torch.Tensor) -> torch.Tensor:
     return F.normalize(q_wxyz[..., (1, 2, 3, 0)], dim=-1)
 
 
-def _make_se3(T_CWs: torch.Tensor) -> SE3:
+def _make_se3(T_CWs: torch.Tensor):
+    from lietorch import SE3
+
     vectors = torch.cat(
         (T_CWs[..., :3, 3], _matrix_to_xyzw(T_CWs[..., :3, :3])),
         dim=-1,

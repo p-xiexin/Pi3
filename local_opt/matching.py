@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 
 import torch
 import torch.nn.functional as F
@@ -28,34 +27,19 @@ class Tracks:
     ws: torch.Tensor       # [S, P]
 
 
-def _sample_grid(
+def _sample_reliable(
     mask: torch.Tensor,
-    score: torch.Tensor,
     max_points: int,
 ) -> torch.Tensor:
-    """Select one highest-scoring valid point from each image-grid cell."""
+    """Randomly sample pixels from the depth-confidence-filtered region."""
 
-    H, W = mask.shape
-    rows = max(min(int(math.sqrt(max_points * H / W)), H), 1)
-    columns = max(min(max_points // rows, W), 1)
+    valid_indices = torch.nonzero(mask.reshape(-1), as_tuple=False).squeeze(-1)
+    count = min(max(max_points, 0), valid_indices.numel())
+    if count == 0:
+        return valid_indices[:0]
 
-    ys = torch.arange(H, device=mask.device)
-    xs = torch.arange(W, device=mask.device)
-    cell_y = torch.div(ys * rows, H, rounding_mode="floor")
-    cell_x = torch.div(xs * columns, W, rounding_mode="floor")
-    cells = (cell_y[:, None] * columns + cell_x[None]).reshape(-1)
-
-    mask = mask.reshape(-1)
-    score = score.reshape(-1)
-    cell_count = rows * columns
-    best_score = score.new_full((cell_count,), -torch.inf)
-    best_score.scatter_reduce_(0, cells[mask], score[mask], reduce="amax")
-
-    indices = torch.arange(H * W, device=mask.device)
-    is_best = mask & (score == best_score[cells])
-    selected = indices.new_full((cell_count,), H * W)
-    selected.scatter_reduce_(0, cells[is_best], indices[is_best], reduce="amin")
-    return selected[selected < H * W]
+    order = torch.randperm(valid_indices.numel(), device=mask.device)[:count]
+    return valid_indices[order]
 
 
 @torch.no_grad()
@@ -116,9 +100,9 @@ def match_tracks(
         & (Ws[..., 1] <= H - 1)
         & (Qs >= warp_confidence_threshold)
     )
-    eligible = anchor_valid & valid.any(dim=0)
-    score = frames.Cs[r] * torch.where(valid, Qs, 0).amax(dim=0)
-    sampled = _sample_grid(eligible, score, points_per_keyframe)
+    # Appendix C.1: sample from depth-reliable keyframe regions first, then
+    # propagate through dense warps and discard low-confidence observations.
+    sampled = _sample_reliable(anchor_valid, points_per_keyframe)
     P_r = sampled.numel()
 
     xs = sampled.remainder(W)

@@ -17,6 +17,16 @@ _EXPORTS = {
     "load_glob3r_for_sfm": (".inference", "load_glob3r_for_sfm"),
     "match_tracks": (".matching", "match_tracks"),
     "opt_pose_ray": (".backend", "opt_pose_ray"),
+    "PoseGraph": (".pose_graph", "PoseGraph"),
+    "build_pose_graph": (".pose_graph", "build_pose_graph"),
+    "maximum_spanning_tree_initialization": (
+        ".pose_graph",
+        "maximum_spanning_tree_initialization",
+    ),
+    "robust_rotation_averaging": (
+        ".pose_graph",
+        "robust_rotation_averaging",
+    ),
     "save_matching_matrix": (
         ".visualization",
         "save_matching_matrix",

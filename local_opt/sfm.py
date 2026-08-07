@@ -14,6 +14,12 @@ from pi3.utils.geometry import depth_edge
 from .backend import bundle_adjust, opt_pose_ray
 from .frame import Frames
 from .matching import Tracks, match_tracks
+from .pose_graph import (
+    PoseGraph,
+    build_pose_graph,
+    maximum_spanning_tree_initialization,
+    robust_rotation_averaging,
+)
 from .visualization import save_matching_matrix
 
 
@@ -26,6 +32,9 @@ class Glob3RSfMConfig:
     depth_confidence_threshold: float = 0.6
     warp_confidence_threshold: float = 0.8
     scale_ransac_threshold: float = 0.1
+    rotation_iterations: int = 15
+    rotation_robust_delta: float = 0.1
+    scale_prior_weight: float = 1.0e3
     eq5_iterations: int = 15
     eq6_iterations: int = 20
 
@@ -36,6 +45,9 @@ class SfMResult:
     optimized_frames: Frames
     keyframes: torch.Tensor
     tracks: Tracks
+    pose_graph: PoseGraph
+    T_CWs_mst: torch.Tensor
+    Rs_avg: torch.Tensor
     track_inliers: torch.Tensor
     Xs_W0: torch.Tensor
     Xs_W: torch.Tensor
@@ -220,12 +232,33 @@ class Glob3RSfMPipeline:
                 f"to {visualization_dir}"
             )
 
-        # Each track j is initialized only from its keyframe-local Pi3 point.
+        # Secs. 3.2-3.3: shared tracks define the weighted pose graph. Relative
+        # poses initialize a global frame on its maximum spanning tree, then
+        # robust rotation averaging consolidates all graph edges.
+        T_CWs_local = torch.linalg.inv(frames.T_WCs)
+        pose_graph = build_pose_graph(tracks, T_CWs_local)
+        T_CWs_mst = maximum_spanning_tree_initialization(S, pose_graph)
+        Rs = robust_rotation_averaging(
+            T_CWs_mst,
+            pose_graph,
+            iterations=self.config.rotation_iterations,
+            robust_delta=self.config.rotation_robust_delta,
+        )
+        T_WCs_mst = torch.linalg.inv(T_CWs_mst)
+        cs0 = T_WCs_mst[:, :3, 3]
+        print(
+            f"Pose graph: nodes={S}, edges={pose_graph.source.numel()}, "
+            f"MST edges={S - 1}"
+        )
+
+        # Each track j is initialized only from its keyframe-local Pi3 point,
+        # using the averaged rotation and MST-initialized camera center.
         # X_j^0 = T_WC,r X_r(u_r); target-frame point maps are not substituted.
-        T_WCr = frames.T_WCs[tracks.rs]
         Xs_W0 = torch.einsum(
-            "pij,pj->pi", T_WCr[:, :3, :3], tracks.Xs_Cr
-        ) + T_WCr[:, :3, 3]
+            "pij,pj->pi",
+            Rs[tracks.rs].transpose(-1, -2),
+            tracks.Xs_Cr,
+        ) + cs0[tracks.rs]
 
         is_, js = torch.nonzero(tracks.mask, as_tuple=True)
         uv1s = torch.cat(
@@ -233,9 +266,6 @@ class Glob3RSfMPipeline:
             dim=-1,
         )
         vs = torch.einsum("oij,oj->oi", torch.linalg.inv(frames.Ks[is_]), uv1s)
-        T_CWs0 = torch.linalg.inv(frames.T_WCs)
-        Rs = T_CWs0[:, :3, :3]
-        cs0 = frames.T_WCs[:, :3, 3]
         ws = tracks.ws[is_, js]
 
         eq5 = opt_pose_ray(
@@ -247,6 +277,7 @@ class Glob3RSfMPipeline:
             js,
             ws,
             iterations=self.config.eq5_iterations,
+            scale_prior_weight=self.config.scale_prior_weight,
         )
         T_CWs5 = torch.eye(4, device=Is.device, dtype=Is.dtype).repeat(S, 1, 1)
         T_CWs5[:, :3, :3] = Rs
@@ -260,6 +291,7 @@ class Glob3RSfMPipeline:
             frames.deltas,
             tracks,
             iterations=self.config.eq6_iterations,
+            scale_prior_weight=self.config.scale_prior_weight,
         )
         print(f"Eq. (6) loss: {float(eq6.loss):.6g}")
         optimized_frames = frames.with_optimization(
@@ -280,6 +312,9 @@ class Glob3RSfMPipeline:
             optimized_frames=optimized_frames,
             keyframes=keyframes,
             tracks=tracks,
+            pose_graph=pose_graph,
+            T_CWs_mst=T_CWs_mst,
+            Rs_avg=Rs,
             track_inliers=track_inliers,
             Xs_W0=Xs_W0,
             Xs_W=eq6.Xs_W,
