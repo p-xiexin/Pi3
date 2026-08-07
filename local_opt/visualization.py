@@ -43,8 +43,9 @@ def _jet(value: torch.Tensor) -> torch.Tensor:
     )
 
 
-def _track_colors(count: int) -> list[tuple[int, int, int]]:
-    values = torch.arange(count).float() / max(count - 1, 1)
+def _track_colors(ks: torch.Tensor) -> list[tuple[int, int, int]]:
+    count = int(ks.max()) + 1 if ks.numel() else 0
+    values = ks.detach().float().cpu() / max(count - 1, 1)
     rgb = _jet(values)
     return [
         tuple(int(channel * 255) for channel in color)
@@ -115,7 +116,7 @@ def save_matching_matrix(
     column_count = 5
 
     Ws, Qs = _final_warp(output, (H, W))
-    colors = _track_colors(tracks.us.shape[1])
+    colors = _track_colors(tracks.ks)
     Ds = frames.Xs_C[..., 2]
     depth_valid = torch.isfinite(Ds) & (Ds > 0)
     depth_limits = torch.quantile(Ds[depth_valid].float(), Ds.new_tensor([0.02, 0.98]))

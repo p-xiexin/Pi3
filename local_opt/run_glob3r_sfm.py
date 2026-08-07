@@ -125,6 +125,7 @@ def main():
             "distortion": result.deltas.cpu(),
             "keyframes": result.keyframes,
             "track_references": result.tracks.rs.cpu(),
+            "track_ids": result.tracks.ks.cpu(),
             "track_anchor_points": result.tracks.Xs_Cr.cpu(),
             "track_observations": result.tracks.us.cpu(),
             "track_mask": result.tracks.mask.cpu(),
@@ -166,13 +167,13 @@ def main():
     )
     observation_count = result.tracks.mask.sum(dim=0)
     observation_count[~result.track_inliers] = -1
+    # A sparse point is identified as P_k^r by (reference_id, track_id).
     save_ply(
         sparse_point_cloud_output,
         result.Xs_W,
         scalar_fields={
-            "track_id": torch.arange(
-                result.Xs_W.shape[0], device=result.Xs_W.device
-            ),
+            "reference_id": result.tracks.rs,
+            "track_id": result.tracks.ks,
             "observation_count": observation_count,
         },
     )

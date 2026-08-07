@@ -13,7 +13,7 @@ from pi3.utils.geometry import depth_edge
 
 from .backend import bundle_adjust, opt_pose_ray
 from .frame import Frames
-from .matching import Tracks, match_tracks
+from .matching import Tracks, filter_track_frames, match_tracks
 from .pose_graph import (
     PoseGraph,
     build_pose_graph,
@@ -31,6 +31,8 @@ class Glob3RSfMConfig:
     keyframe_projection_threshold: float = 0.2
     depth_confidence_threshold: float = 0.6
     warp_confidence_threshold: float = 0.8
+    min_triangulation_angle_deg: float = 1.5
+    min_overlap_ratio: float = 0.25
     scale_ransac_threshold: float = 0.1
     rotation_iterations: int = 15
     rotation_robust_delta: float = 0.1
@@ -202,6 +204,15 @@ class Glob3RSfMPipeline:
                 depth_confidence_threshold=self.config.depth_confidence_threshold,
                 warp_confidence_threshold=self.config.warp_confidence_threshold,
             )
+            tracks_r = filter_track_frames(
+                tracks_r,
+                frames,
+                reference_index=r,
+                min_triangulation_angle_deg=(
+                    self.config.min_triangulation_angle_deg
+                ),
+                min_overlap_ratio=self.config.min_overlap_ratio,
+            )
             track_parts.append(tracks_r)
             if visualization_dir is not None:
                 matching_paths.append(
@@ -216,6 +227,7 @@ class Glob3RSfMPipeline:
 
         tracks = Tracks(
             rs=torch.cat([part.rs for part in track_parts]),
+            ks=torch.cat([part.ks for part in track_parts]),
             Xs_Cr=torch.cat([part.Xs_Cr for part in track_parts]),
             us=torch.cat([part.us for part in track_parts], dim=1),
             mask=torch.cat([part.mask for part in track_parts], dim=1),

@@ -14,6 +14,7 @@ _EXPORTS = {
     "Eq5Result": (".backend", "Eq5Result"),
     "Eq6Result": (".backend", "Eq6Result"),
     "bundle_adjust": (".backend", "bundle_adjust"),
+    "filter_track_frames": (".matching", "filter_track_frames"),
     "load_glob3r_for_sfm": (".inference", "load_glob3r_for_sfm"),
     "match_tracks": (".matching", "match_tracks"),
     "opt_pose_ray": (".backend", "opt_pose_ray"),
