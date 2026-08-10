@@ -226,7 +226,7 @@ def _matrix_to_xyzw(Rs: torch.Tensor) -> torch.Tensor:
     m00, m01, m02 = Rs[..., 0, 0], Rs[..., 0, 1], Rs[..., 0, 2]
     m10, m11, m12 = Rs[..., 1, 0], Rs[..., 1, 1], Rs[..., 1, 2]
     m20, m21, m22 = Rs[..., 2, 0], Rs[..., 2, 1], Rs[..., 2, 2]
-    qs = torch.stack(
+    quaternion_norms_squared = torch.stack(
         (
             1 + m00 + m11 + m22,
             1 + m00 - m11 - m22,
@@ -234,7 +234,14 @@ def _matrix_to_xyzw(Rs: torch.Tensor) -> torch.Tensor:
             1 - m00 - m11 + m22,
         ),
         dim=-1,
-    ).clamp_min(0).sqrt()
+    )
+    # For a valid rotation, the selected largest entry is at least one, so
+    # clamping only changes unused quaternion branches.  Keeping those branch
+    # square roots strictly positive avoids the undefined sqrt gradient at
+    # zero, which otherwise produces NaNs for identity rotations.
+    qs = quaternion_norms_squared.clamp_min(
+        torch.finfo(Rs.dtype).eps
+    ).sqrt()
     candidates = torch.stack(
         (
             torch.stack(
