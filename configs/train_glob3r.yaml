@@ -1,0 +1,20 @@
+defaults:
+  - glob3r_coarse
+  - _self_
+
+name: train_glob3r
+trainer: trainers.glob3r_trainer.Glob3RTrainer
+
+stages:
+  - name: glob3r_coarse
+
+  - name: glob3r_refinement
+    glob3r:
+      stage: refinement
+      matching_checkpoint: ${work_dir}/outputs/glob3r_coarse/ckpts/best_model/pytorch_model.bin
+      backbone_checkpoint: 
+      romav2_refinement_checkpoint: 
+    train:
+      image_num_range: [2, 24]
+      optimizer:
+        lr: 5.0e-5

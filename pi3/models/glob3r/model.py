@@ -22,12 +22,11 @@ from torchvision.models import vgg19_bn
 
 @dataclass
 class GeometryPrediction:
-    """Glob3R Eq. (1): ``f({I_i}) = {T_i, X_i, C_i, m_i}``."""
+    """Geometry tensors consumed by the Glob3R matching head."""
 
     camera_poses: torch.Tensor
     local_points: torch.Tensor
     confidence: Optional[torch.Tensor]
-    metric_scale: Optional[torch.Tensor]
 
 
 def pack_geometry_prediction(output: dict) -> GeometryPrediction:
@@ -37,7 +36,6 @@ def pack_geometry_prediction(output: dict) -> GeometryPrediction:
         camera_poses=output["camera_poses"],
         local_points=output["local_points"],
         confidence=output.get("conf"),
-        metric_scale=output.get("metric"),
     )
 
 
