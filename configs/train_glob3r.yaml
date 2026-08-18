@@ -4,16 +4,31 @@ defaults:
 
 name: train_glob3r
 trainer: trainers.glob3r_trainer.Glob3RTrainer
+run_id: ${now:%Y%m%d_%H%M%S}
+
+hydra:
+  run:
+    dir: ${work_dir}/outputs/glob3r_${run_id}
+  job_logging:
+    handlers:
+      file:
+        filename: ${hydra:runtime.output_dir}/train.log
 
 stages:
   - name: glob3r_coarse
+    log:
+      output_dir: ${hydra:runtime.output_dir}/coarse/
+      ckpt_dir: ${hydra:runtime.output_dir}/coarse/ckpts
 
   - name: glob3r_refinement
     glob3r:
       stage: refinement
-      matching_checkpoint: ${work_dir}/outputs/glob3r_coarse/ckpts/best_model/pytorch_model.bin
+      matching_checkpoint: ${hydra:runtime.output_dir}/coarse/ckpts/best_model/pytorch_model.bin
       backbone_checkpoint: 
       romav2_refinement_checkpoint: 
+    log:
+      output_dir: ${hydra:runtime.output_dir}/refinement/
+      ckpt_dir: ${hydra:runtime.output_dir}/refinement/ckpts
     train:
       image_num_range: [2, 24]
       optimizer:

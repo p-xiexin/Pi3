@@ -38,6 +38,7 @@ from .pose_graph import (
     robust_rotation_averaging,
 )
 from .sfm import select_keyframes_eq4
+from .timing import tic, toc
 
 
 # Temporary experiment settings. Edit these values directly before running.
@@ -582,7 +583,6 @@ def run_sparse_sfm(
         Ks = Ks.unsqueeze(dim=0).expand(frame_count, -1, -1).clone()
     images = images.float()
     images_window = images.unsqueeze(dim=0)
-    frontend.prepare_window(images_window)
     keyframes = keyframes.to(device=images.device, dtype=torch.long)
     if keyframes.ndim != 1 or keyframes.numel() == 0:
         raise ValueError("Pi3 Eq. (4) did not select any keyframes")
@@ -595,11 +595,19 @@ def run_sparse_sfm(
         for path in visualization_dir.glob("reference_*.png"):
             path.unlink()
 
-    track_parts = []
+    tic()
+    frontend.prepare_window(images_window)
+    frontend_outputs = []
     for reference_tensor in keyframes:
         reference = int(reference_tensor)
         print(f"VGGSfM tracking from reference {reference}")
         output = frontend.match_reference(images_window, reference)
+        frontend_outputs.append(output)
+    toc("VGGSfM complete forward")
+
+    track_parts = []
+    for output in frontend_outputs:
+        reference = output.reference_index
         part = _tracks_from_vggsfm(
             output,
             frame_count,

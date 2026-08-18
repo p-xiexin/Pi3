@@ -8,6 +8,8 @@ import torch
 
 from pi3.models.glob3r.glob3r_training import Glob3R
 
+from .timing import tic, toc
+
 
 class Glob3RSfM(Glob3R):
     """Reuse one frozen Pi3 pass for Eq. (1) and multi-keyframe Eq. (2)."""
@@ -128,11 +130,14 @@ class Glob3RSfM(Glob3R):
     ):
         """Run Eq. (2) for one reference using cached window features."""
 
-        return self.glob3r_matching_head(
+        tic()
+        output = self.glob3r_matching_head(
             patch_tokens,
             encoder_features,
             Is,
             reference_index=reference_index,
         )
+        toc(f"Glob3R matching forward reference {reference_index}")
+        return output
 
 __all__ = ["Glob3RSfM"]
