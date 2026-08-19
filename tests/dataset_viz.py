@@ -14,6 +14,10 @@ from omegaconf import DictConfig
 from PIL import Image, ImageDraw
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPOSITORY_ROOT))
+
+
 @dataclass
 class WarpSupervision:
     warp: torch.Tensor
@@ -297,10 +301,9 @@ def render_dataset_geometry(
 @hydra.main(
     version_base="1.2",
     config_path="../configs",
-    config_name="dataset_visualization",
+    config_name="dataset_viz.yaml",
 )
 def main(cfg: DictConfig) -> None:
-    sys.path.insert(0, str(Path(cfg.project_root).resolve()))
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -309,10 +312,7 @@ def main(cfg: DictConfig) -> None:
         dataset_output_dir = output_dir / dataset_name
         dataset_output_dir.mkdir(parents=True, exist_ok=True)
 
-        for sample_index in range(
-            cfg.sample_index,
-            cfg.sample_index + cfg.num_samples,
-        ):
+        for sample_index in range(cfg.sample_index, cfg.sample_index + cfg.num_samples):
             views = dataset[sample_index]
             overview, statistics = render_dataset_geometry(
                 views,
@@ -322,10 +322,7 @@ def main(cfg: DictConfig) -> None:
             )
             output_path = dataset_output_dir / f"sample_{sample_index:04d}.png"
             overview.save(output_path)
-            print(
-                f"\n[{dataset_name}:{sample_index}] {views[0]['label']} "
-                f"-> {output_path.resolve()}"
-            )
+            print(f"\n[{sample_index}] {views[0]['label']} -> {output_path.resolve()}")
             for line in statistics:
                 print(f"  {line}")
             if cfg.show:

@@ -1,0 +1,139 @@
+datasets:
+  # scannet:
+  #   _target_: datasets.glob3r_scannet_dataset.Glob3RScannetValidationDataset
+  #   data_root: /starmap/nas/workspace/pxx/data/scannet
+  #   index_file: data/dataset_cache/scannet_index.npy
+  #   resolution: [[224, 224]]
+  #   frame_num: 8
+  #   frame_step: 5
+  #   sample_seed: 2026
+  #   transform:
+  #     _partial_: true
+  #     _target_: datasets.base.transforms.ImgToTensor
+  #   mode: train
+  #   seed: 2026
+  # ads:
+  #   _target_: datasets.ads_dataset_clean.AdsDataset
+  #   obs_path: data/dataset_cache/ads.npy
+  #   resolution: [[448, 224]]
+  #   z_far: 80
+  #   frame_num: 8
+  #   aug_crop: 16
+  #   aug_focal: 0.9
+  #   transform:
+  #     _partial_: true
+  #     _target_: datasets.base.transforms.ImgToTensor
+  # rieman:
+  #   _target_: datasets.rieman_dataset_clean.RiemannDataset
+  #   data_root: data/dataset_cache/riemann.npy
+  #   resolution: [[448, 224]]
+  #   z_far: 80
+  #   frame_num: 8
+  #   aug_crop: 16
+  #   aug_focal: 0.9
+  #   transform:
+  #     _partial_: true
+  #     _target_: datasets.base.transforms.ImgToTensor
+  # arkit:
+  #   _target_: datasets.arkit_dataset.ARKitScenesPi3XDataset
+  #   data_root: /starmap/nas/workspace/pxx/data/arkitscenes
+  #   index_file: data/dataset_cache/arkitscenes.npy
+  #   resolution: [[448, 224]]
+  #   z_far: 80
+  #   frame_num: 8
+  #   aug_crop: 16
+  #   aug_focal: 0.9
+  #   transform:
+  #     _partial_: true
+  #     _target_: datasets.base.transforms.ImgToTensor
+  # ase:
+  #   _target_: datasets.ase_dataset.AriaSyntheticEnvironmentsPi3XDataset
+  #   data_root: /starmap/nas/workspace/pxx/data/ASE
+  #   index_file: data/dataset_cache/ase.npy
+  #   resolution: [[448, 224]]
+  #   z_far: 80
+  #   frame_num: 8
+  #   aug_crop: 16
+  #   aug_focal: 0.9
+  #   transform:
+  #     _partial_: true
+  #     _target_: datasets.base.transforms.ImgToTensor
+  # blendmvs:
+  #   _target_: datasets.blendmvs_dataset.BlendedMVSPi3XDataset
+  #   data_root: /starmap/nas/workspace/pxx/data/blendmvs
+  #   index_file: data/dataset_cache/blendedmvs.npy
+  #   resolution: [[448, 224]]
+  #   frame_num: 8
+  #   z_far: 80
+  #   aug_crop: 1
+  #   aug_focal: 1.0
+  #   transform:
+  #     _partial_: true
+  #     _target_: datasets.base.transforms.ImgToTensor
+  # waymo:
+  #   _target_: datasets.waymo_processed_dataset.WaymoPi3XDataset
+  #   data_root: /starmap/nas/workspace/pxx/data/waymo_processed
+  #   index_file: data/dataset_cache/waymo_processed.npy
+  #   resolution: [[448, 224]]
+  #   camera_id: 0
+  #   frame_step: 3
+  #   depth_accumulate: 10
+  #   splat_radius: 0
+  #   frame_num: 8
+  #   z_far: 80
+  #   aug_crop: 1
+  #   aug_focal: 1.0
+  #   transform:
+  #     _partial_: true
+  #     _target_: datasets.base.transforms.ImgToTensor
+  kitti:
+    _target_: datasets.kitti_dataset.KITTIPi3XDataset
+    raw_root: /starmap/nas/workspace/pxx/data/kitti_raw
+    depth_root: /starmap/nas/workspace/pxx/data/kitti_depth
+    index_file: data/dataset_cache/kitti.npy
+    resolution: [[448, 224]]
+    cameras:
+      - image_02
+    splits:
+      - train
+    frame_num: 8
+    frame_step: 1
+    splat_radius: 1
+    z_far: 80
+    aug_crop: 1
+    aug_focal: 1.0
+    transform:
+      _partial_: true
+      _target_: datasets.base.transforms.ImgToTensor
+
+
+  # nuscenes:
+  #   _target_: datasets.nuscenes_dataset.NuScenesPi3XDataset
+  #   index_file: data/dataset_cache/nuscenes.npy
+  #   data_root: /starmap/nas184/open_source/nuScenes/v1.0-mini
+  #   resolution: [[448, 224]]
+  #   cameras:
+  #   - CAM_FRONT
+  #   frame_step: 1
+  #   map_context: 8
+  #   splat_radius: 1
+  #   z_far: 80
+  #   frame_num: 8
+  #   aug_crop: 16
+  #   aug_focal: 0.9
+  #   transform:
+  #     _partial_: true
+  #     _target_: datasets.base.transforms.ImgToTensor
+
+
+output_dir: ${hydra:runtime.cwd}/viz/
+sample_index: 0
+num_samples: 1
+reference_index: 0
+depth_threshold: 0.05
+cell_width: 240
+show: false
+
+hydra:
+  job:
+    chdir: false
