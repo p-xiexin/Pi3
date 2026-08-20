@@ -7,8 +7,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 from plyfile import PlyData, PlyElement
 
+from local_opt.image_utils import crop_resize
 from local_opt.inference import (
     load_calibration,
     load_glob3r_for_sfm,
@@ -34,8 +36,16 @@ def parse_args():
     parser.add_argument("--device", default="cuda:1")
     parser.add_argument(
         "--calibration",
-        required=True,
-        help="fixed camera calibration YAML",
+        default=None,
+        help="optional fixed camera calibration YAML",
+    )
+    parser.add_argument(
+        "--mask",
+        default=None,
+        help=(
+            "optional shared 01 valid mask; zero pixels exclude the hood "
+            "or other fixed camera occlusions"
+        ),
     )
     parser.add_argument(
         "--keyframe-threshold",
@@ -77,18 +87,32 @@ def main():
     if args.height % 14 or args.width % 14:
         raise ValueError("height and width must be divisible by Pi3 patch size 14")
     Is, paths = load_image_sequence(args.images, (args.height, args.width))
+    valid_mask = None
+    if args.calibration is not None:
+        K, calibration_width, calibration_height = load_calibration(args.calibration)
+    else:
+        focal = float(max(args.width, args.height))
+        K = torch.tensor(
+            [[focal, 0, args.width / 2], [0, focal, args.height / 2], [0, 0, 1]],
+            dtype=torch.float32,
+        )
+    with Image.open(paths[0]) as source:
+        if args.calibration is not None:
+            K[0] *= source.width / calibration_width
+            K[1] *= source.height / calibration_height
+        mask = np.array(Image.open(args.mask).convert("L")) if args.mask else None
+        _, mask, resized_K = crop_resize(
+            source.convert("RGB"), K.numpy(), (args.height, args.width), mask
+        )
+    if args.calibration is not None:
+        K = torch.from_numpy(resized_K).float()
+    if mask is not None:
+        valid_mask = torch.from_numpy(mask > 0)
     print("Input frame order:")
     for index, path in enumerate(paths):
         print(f"  [{index:04d}] {path.name}")
 
-    calibration_path = Path(args.calibration)
-    K, calibration_width, calibration_height = load_calibration(
-        calibration_path
-    )
-    K[0] *= args.width / calibration_width
-    K[1] *= args.height / calibration_height
-    print(f"Using fixed calibration from {calibration_path}")
-    print(f"Fixed resized intrinsics:\n{K}")
+    print(f"Input intrinsics:\n{K}")
     print("Lens distortion is disabled for local optimization.")
     model = load_glob3r_for_sfm(
         args.backbone_checkpoint, args.matching_checkpoint, device=args.device
@@ -102,6 +126,7 @@ def main():
     result = pipeline.run(
         Is.to(args.device),
         K.to(args.device),
+        valid_mask=None if valid_mask is None else valid_mask.to(args.device),
         visualization_dir=matching_output,
     )
     print(f"Selected keyframes: {result.keyframes.tolist()}")
@@ -119,6 +144,7 @@ def main():
     torch.save(
         {
             "image_paths": [str(path) for path in paths],
+            "valid_mask": valid_mask,
             "world_to_camera": result.T_CWs.cpu(),
             "camera_to_world": result.T_WCs.cpu(),
             "intrinsics": result.Ks.cpu(),

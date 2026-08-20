@@ -83,13 +83,22 @@ def select_keyframes_eq4(
     frames: Frames,
     proj_threshold: float,
     conf_threshold: float,
+    valid_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Select keyframes using the valid-projection count in paper Eq. (4)."""
 
     keyframes = [0]
     H, W = frames.Xs_C.shape[1:3]
-    pixel_threshold = proj_threshold * H * W
+    if valid_mask is None:
+        valid_mask = torch.ones_like(frames.Cs, dtype=torch.bool)
+    elif valid_mask.ndim == 2:
+        valid_mask = valid_mask[None].expand(len(frames), -1, -1)
     for t in range(1, len(frames)):
+        if t - keyframes[-1] >= 5:
+            keyframes.append(t)
+            continue
+        target_valid = valid_mask[t]
+        pixel_threshold = proj_threshold * target_valid.sum()
         T_Cr_Ct = torch.linalg.inv(frames.T_WCs[keyframes]) @ frames.T_WCs[t]
         Xs_Ct = frames.Xs_C[t].reshape(-1, 3)
         Xs_Cr = torch.einsum(
@@ -97,8 +106,17 @@ def select_keyframes_eq4(
         ) + T_Cr_Ct[:, None, :3, 3]
         ps = torch.einsum("kij,kmj->kmi", frames.Ks[keyframes], Xs_Cr)
         us = ps[..., :2] / ps[..., 2:3].clamp_min(1.0e-8)
+        pixels = us.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).round().long()
+        pixels[..., 0].clamp_(0, W - 1)
+        pixels[..., 1].clamp_(0, H - 1)
+        reference_ids = torch.arange(len(keyframes), device=us.device)[:, None]
+        projected_valid = valid_mask[keyframes][
+            reference_ids, pixels[..., 1], pixels[..., 0]
+        ]
         mask = (
-            (frames.Cs[t].reshape(1, -1) > conf_threshold)
+            target_valid.reshape(1, -1)
+            & projected_valid
+            & (frames.Cs[t].reshape(1, -1) > conf_threshold)
             & (Xs_Cr[..., 2] > 0)
             & (us[..., 0] >= 0)
             & (us[..., 0] <= W - 1)
@@ -143,6 +161,7 @@ class Glob3RSfMPipeline:
         self,
         Is: torch.Tensor,
         K: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
         visualization_dir: Optional[str | Path] = None,
     ) -> SfMResult:
         S = Is.shape[0]
@@ -150,10 +169,16 @@ class Glob3RSfMPipeline:
         Ks = K.to(device=Is.device, dtype=Is.dtype)
         if Ks.ndim == 2:
             Ks = Ks.unsqueeze(dim=0).expand(S, -1, -1).clone()
+        model_Is = Is
+        if valid_mask is not None:
+            valid_mask = valid_mask.to(device=Is.device, dtype=torch.bool)
+            if valid_mask.shape != Is.shape[-2:]:
+                raise ValueError("valid_mask must have shape [H,W]")
+            model_Is = Is * valid_mask[None, None]
 
         print(f"Backbone inference: frames [0, {S - 1}]")
         geometry, patch_tokens, encoder_features = self.model.infer_window(
-            Is.unsqueeze(dim=0)
+            model_Is.unsqueeze(dim=0)
         )
         # [B, S, H, W, 3] -> [S, H, W, 3]
         Xs_C = geometry["local_points"].squeeze(dim=0)
@@ -161,7 +186,6 @@ class Glob3RSfMPipeline:
         T_WCs = geometry["camera_poses"].squeeze(dim=0).clone()
         # [B, S, H, W, 1] -> [S, H, W]
         Cs = geometry["conf"].squeeze(dim=0).sigmoid().squeeze(dim=-1)
-
         T_C0W = torch.linalg.inv(T_WCs[0])
         T_WCs = T_C0W.unsqueeze(dim=0) @ T_WCs
         frames = Frames(
@@ -176,7 +200,10 @@ class Glob3RSfMPipeline:
             frames,
             proj_threshold=self.config.keyframe_projection_threshold,
             conf_threshold=self.config.depth_confidence_threshold,
+            valid_mask=valid_mask,
         )
+        if valid_mask is not None:
+            frames.Cs *= valid_mask[None]
         if visualization_dir is not None:
             visualization_dir = Path(visualization_dir)
             visualization_dir.mkdir(parents=True, exist_ok=True)
@@ -186,7 +213,7 @@ class Glob3RSfMPipeline:
         track_parts = []
         matching_paths = []
         # [S, 3, H, W] -> [B, S, 3, H, W]
-        Is_window = frames.Is.unsqueeze(dim=0)
+        Is_window = model_Is.unsqueeze(dim=0)
         for r_tensor in keyframes:
             r = int(r_tensor)
             print(f"Matching inference: reference {r} -> frames [0, {S - 1}]")

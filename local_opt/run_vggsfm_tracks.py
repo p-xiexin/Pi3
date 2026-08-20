@@ -23,8 +23,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from torch import nn
 
 from pi3.utils.geometry import depth_edge
@@ -42,11 +44,12 @@ from .timing import tic, toc
 
 
 # Temporary experiment settings. Edit these values directly before running.
-IMAGE_DIR = "path/to/images"
-BACKBONE_CHECKPOINT = "path/to/pi3/model.safetensors"
-VGGSFM_ROOT = "../vggsfm"
-VGGSFM_CHECKPOINT = "../vggsfm/ckpt/vggsfm_v2_0_0.bin"
-CALIBRATION = "path/to/calibration.yaml"
+IMAGE_DIR = "data/chunk"
+BACKBONE_CHECKPOINT = "ckpts/Pi3/model.safetensors"
+VGGSFM_ROOT = "../vggsfm-main"
+VGGSFM_CHECKPOINT = "../vggsfm-main/ckpt/vggsfm_v2_0_0.bin"
+CALIBRATION = None
+MASK = None
 OUTPUT = "outputs/vggsfm_tracks_sfm/result.pt"
 MATCH_VIS_DIR = "outputs/vggsfm_tracks_sfm/matching"
 HEIGHT = 336
@@ -57,12 +60,14 @@ RANDOM_SEED = 0
 # Pi3 is used once for Eq. (4) keyframe selection and post-BA dense depth.
 KEYFRAME_PROJECTION_THRESHOLD = 0.5
 POINTS_PER_QUERY_FRAME = 2048
+QUERY_METHODS = ["sp", "sift"]
+QUERY_DETECTION_THRESHOLD = 0.005
+QUERY_BUCKET_GRID = (8, 6)  # columns, rows
+QUERY_CANDIDATE_MULTIPLIER = 4
 TRACK_CONFIDENCE_THRESHOLD = 0.2
 TRACKER_SIZE = 1024
 FINE_TRACKING = True
 MIXED_PRECISION = "fp16"  # "none", "fp16", or "bf16"
-QUERY_NMS_RADIUS = 4
-QUERY_BORDER = 8
 MIN_TRACK_OBSERVATIONS = 3
 MIN_PAIR_MATCHES = 16
 MIN_PAIR_INLIERS = 12
@@ -78,6 +83,7 @@ MAX_REPROJECTION_ERROR_PX = 4.0
 # "pi3" replaces DepthAnything with a Pi3 local point map after sparse BA.
 DENSE_RECONSTRUCTION = "pi3"  # "none" or "pi3"
 DENSE_ALIGNMENT = "disparity_affine"  # "scale" or "disparity_affine"
+PI3_MASK_CONFIDENCE_THRESHOLD = 0.1
 DEPTH_CONFIDENCE_THRESHOLD = 0.1
 SCALE_RANSAC_THRESHOLD = 0.1
 DISPARITY_RANSAC_RATIO = 30.0
@@ -168,6 +174,7 @@ class VGGSfMTrackFrontend(nn.Module):
         self,
         images: torch.Tensor,
         reference_index: int,
+        valid_mask: torch.Tensor | None = None,
     ) -> VGGSfMTrackOutput:
         if self._fmaps is None or self._tracker_images is None:
             raise RuntimeError("prepare_window must run before VGGSfM tracking")
@@ -176,6 +183,7 @@ class VGGSfMTrackFrontend(nn.Module):
         query_points, flat_indices = _select_image_query_points(
             images[0, reference_index],
             self.points_per_query_frame,
+            None if valid_mask is None else valid_mask[reference_index],
         )
         tracker_scale = query_points.new_tensor(
             (
@@ -227,51 +235,75 @@ class VGGSfMTrackFrontend(nn.Module):
 def _select_image_query_points(
     image: torch.Tensor,
     max_points: int,
+    valid_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Select deterministic high-gradient points without Pi3 geometry."""
+    """Extract and spatially bucket LightGlue query points."""
 
-    _, height, width = image.shape
-    gray = (
-        0.2989 * image[0:1]
-        + 0.5870 * image[1:2]
-        + 0.1140 * image[2:3]
-    ).unsqueeze(dim=0)
-    sobel_x = gray.new_tensor(
-        ((-1, 0, 1), (-2, 0, 2), (-1, 0, 1))
-    ).reshape(1, 1, 3, 3)
-    sobel_y = sobel_x.transpose(-1, -2)
-    gx = F.conv2d(gray, sobel_x, padding=1)
-    gy = F.conv2d(gray, sobel_y, padding=1)
-    score = (gx.square() + gy.square()).squeeze(0).squeeze(0)
-    radius = max(int(QUERY_NMS_RADIUS), 0)
-    if radius:
-        pooled = F.max_pool2d(
-            score[None, None],
-            kernel_size=2 * radius + 1,
-            stride=1,
-            padding=radius,
-        ).squeeze(0).squeeze(0)
-        score = torch.where(score == pooled, score, torch.zeros_like(score))
-    border = min(int(QUERY_BORDER), height // 2, width // 2)
-    if border:
-        score[:border] = 0
-        score[-border:] = 0
-        score[:, :border] = 0
-        score[:, -border:] = 0
-    valid = torch.isfinite(score) & (score > 0)
-    indices = torch.nonzero(valid.reshape(-1), as_tuple=False).squeeze(dim=-1)
-    if indices.numel() == 0:
+    from lightglue import ALIKED, SIFT, SuperPoint
+
+    if not QUERY_METHODS:
+        raise ValueError("QUERY_METHODS must contain at least one extractor")
+    invalid_mask = None if valid_mask is None else (~valid_mask)[None]
+    candidate_limit = max_points * QUERY_CANDIDATE_MULTIPLIER
+    point_parts = []
+    score_parts = []
+    for method in QUERY_METHODS:
+        if method == "sp":
+            extractor = SuperPoint(
+                max_num_keypoints=candidate_limit,
+                detection_threshold=QUERY_DETECTION_THRESHOLD,
+            )
+        elif method == "sift":
+            extractor = SIFT(max_num_keypoints=candidate_limit)
+        elif method == "aliked":
+            extractor = ALIKED(
+                max_num_keypoints=candidate_limit,
+                detection_threshold=QUERY_DETECTION_THRESHOLD,
+            )
+        else:
+            raise ValueError(f"unsupported query method {method}")
+        features = extractor.to(image.device).eval().extract(
+            image[None], invalid_mask=invalid_mask
+        )
+        point_parts.append(features["keypoints"][0])
+        score_parts.append(features["keypoint_scores"][0])
+        del features
+
+    query_points = torch.cat(point_parts)
+    scores = torch.cat(score_parts)
+    finite = torch.isfinite(query_points).all(dim=-1) & torch.isfinite(scores)
+    query_points, scores = query_points[finite], scores[finite]
+    pixels = query_points.round().long()
+    pixels[:, 0].clamp_(0, image.shape[-1] - 1)
+    pixels[:, 1].clamp_(0, image.shape[-2] - 1)
+    if valid_mask is not None:
+        keep = valid_mask[pixels[:, 1], pixels[:, 0]]
+        query_points, pixels, scores = (
+            query_points[keep],
+            pixels[keep],
+            scores[keep],
+        )
+    if query_points.shape[0] == 0:
         raise RuntimeError("the reference image has no valid query points")
-    count = min(max(int(max_points), 0), int(indices.numel()))
-    selected = indices[score.reshape(-1)[indices].topk(count).indices]
-    query_points = torch.stack(
-        (
-            selected.remainder(width),
-            torch.div(selected, width, rounding_mode="floor"),
-        ),
-        dim=-1,
-    ).to(dtype=image.dtype)
-    return query_points, selected
+
+    columns, rows = QUERY_BUCKET_GRID
+    bucket_ids = (
+        pixels[:, 1] * rows // image.shape[-2] * columns
+        + pixels[:, 0] * columns // image.shape[-1]
+    )
+    points_per_bucket, remainder = divmod(max_points, columns * rows)
+    selected = []
+    for bucket_id in range(columns * rows):
+        indices = torch.where(bucket_ids == bucket_id)[0]
+        limit = points_per_bucket + int(bucket_id < remainder)
+        if indices.numel() > limit:
+            indices = indices[scores[indices].topk(limit).indices]
+        if limit:
+            selected.append(indices)
+    selected = torch.cat(selected)
+    query_points, pixels = query_points[selected], pixels[selected]
+    flat_indices = pixels[:, 1] * image.shape[-1] + pixels[:, 0]
+    return query_points.to(dtype=image.dtype), flat_indices
 
 
 def _tracks_from_vggsfm(
@@ -281,6 +313,7 @@ def _tracks_from_vggsfm(
     width: int,
     device: torch.device,
     dtype: torch.dtype,
+    valid_mask: torch.Tensor | None = None,
 ) -> Tracks:
     combined_confidence = output.visibility * output.score
     tracks = output.tracks.to(device=device, dtype=dtype)
@@ -293,10 +326,18 @@ def _tracks_from_vggsfm(
         & (combined_confidence >= output.confidence_threshold)
     )
     valid[output.reference_index] = True
+    if valid_mask is not None:
+        pixels = tracks.nan_to_num().round().long()
+        pixels[..., 0].clamp_(0, width - 1)
+        pixels[..., 1].clamp_(0, height - 1)
+        frame_ids = torch.arange(frame_count, device=device)[:, None]
+        valid &= valid_mask[frame_ids, pixels[..., 1], pixels[..., 0]]
     weights = combined_confidence.to(device=device, dtype=dtype)
     weights[output.reference_index] = 1
     weights *= valid
-    keep = valid.sum(dim=0) >= MIN_TRACK_OBSERVATIONS
+    keep = (valid.sum(dim=0) >= MIN_TRACK_OBSERVATIONS) & valid[
+        output.reference_index
+    ]
     point_count = int(keep.sum())
     return Tracks(
         rs=torch.full(
@@ -356,8 +397,6 @@ def _estimate_relative_pose(
     """Estimate target-from-source pose with calibrated essential RANSAC."""
 
     import cv2
-    import numpy as np
-
     source_normalized = _normalized_points(source_points, source_K)
     target_normalized = _normalized_points(target_points, target_K)
     source_np = source_normalized.detach().double().cpu().numpy()
@@ -574,6 +613,7 @@ def run_sparse_sfm(
     keyframes: torch.Tensor,
     frontend: VGGSfMTrackFrontend,
     visualization_dir: str | Path | None,
+    valid_mask: torch.Tensor | None = None,
 ) -> SparseSfMResult:
     frame_count, _, height, width = images.shape
     if frame_count < 2:
@@ -601,7 +641,7 @@ def run_sparse_sfm(
     for reference_tensor in keyframes:
         reference = int(reference_tensor)
         print(f"VGGSfM tracking from reference {reference}")
-        output = frontend.match_reference(images_window, reference)
+        output = frontend.match_reference(images_window, reference, valid_mask)
         frontend_outputs.append(output)
     toc("VGGSfM complete forward")
 
@@ -615,6 +655,7 @@ def run_sparse_sfm(
             width,
             images.device,
             images.dtype,
+            valid_mask,
         )
         track_parts.append(part)
         if visualization_dir is not None:
@@ -805,6 +846,7 @@ def reconstruct_pi3_dense(
     images: torch.Tensor,
     sparse: SparseSfMResult,
     geometry: Mapping[str, torch.Tensor],
+    valid_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Align Pi3 local point maps after BA using optimized sparse depths."""
 
@@ -818,6 +860,8 @@ def reconstruct_pi3_dense(
         .sigmoid()
         .squeeze(dim=-1)
     )
+    if valid_mask is not None:
+        confidence *= valid_mask
     predicted_depth_maps = local_points[..., 2]
     height, width = predicted_depth_maps.shape[-2:]
     ys, xs = torch.meshgrid(
@@ -1035,6 +1079,7 @@ def select_pi3_keyframes(
     images: torch.Tensor,
     K: torch.Tensor,
     geometry: Mapping[str, torch.Tensor],
+    valid_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Apply the original Pi3 Eq. (4) coverage test before sparse SfM."""
 
@@ -1061,6 +1106,7 @@ def select_pi3_keyframes(
         frames,
         proj_threshold=KEYFRAME_PROJECTION_THRESHOLD,
         conf_threshold=DEPTH_CONFIDENCE_THRESHOLD,
+        valid_mask=valid_mask,
     )
 
 
@@ -1154,6 +1200,7 @@ def load_vggsfm_tracker(
 
 
 def main() -> None:
+    from .image_utils import crop_resize
     from .inference import load_calibration, load_image_sequence
     from .run_glob3r_sfm import save_ply
 
@@ -1169,16 +1216,41 @@ def main() -> None:
     print("Input frame order")
     for index, path in enumerate(paths):
         print(f"  [{index:04d}] {path.name}")
-    K, calibration_width, calibration_height = load_calibration(CALIBRATION)
-    K[0] *= WIDTH / calibration_width
-    K[1] *= HEIGHT / calibration_height
+    if CALIBRATION:
+        K, calibration_width, calibration_height = load_calibration(CALIBRATION)
+    else:
+        focal = float(max(WIDTH, HEIGHT))
+        K = torch.tensor(
+            [[focal, 0, WIDTH / 2], [0, focal, HEIGHT / 2], [0, 0, 1]],
+            dtype=torch.float32,
+        )
+    with Image.open(paths[0]) as source:
+        if CALIBRATION:
+            K[0] *= source.width / calibration_width
+            K[1] *= source.height / calibration_height
+        mask = np.array(Image.open(MASK).convert("L")) if MASK else None
+        _, mask, resized_K = crop_resize(
+            source.convert("RGB"), K.numpy(), (HEIGHT, WIDTH), mask
+        )
+    if CALIBRATION:
+        K = torch.from_numpy(resized_K).float()
+    manual_mask = torch.from_numpy(mask > 0) if mask is not None else None
     images = images.to(DEVICE)
     K = K.to(DEVICE)
+    manual_mask = None if manual_mask is None else manual_mask.to(DEVICE)
+    pi3_images = images if manual_mask is None else images * manual_mask[None, None]
 
     geometry_model = load_pi3_geometry(BACKBONE_CHECKPOINT, DEVICE)
     with torch.no_grad():
-        pi3_geometry, _, _ = geometry_model.infer_window(images.unsqueeze(dim=0))
-    keyframes = select_pi3_keyframes(images, K, pi3_geometry)
+        pi3_geometry, _, _ = geometry_model.infer_window(pi3_images.unsqueeze(dim=0))
+    valid_mask = (
+        pi3_geometry["conf"].squeeze(0).sigmoid().squeeze(-1)
+        > PI3_MASK_CONFIDENCE_THRESHOLD
+    )
+    if manual_mask is not None:
+        valid_mask &= manual_mask[None]
+    model_images = images * valid_mask[:, None]
+    keyframes = select_pi3_keyframes(images, K, pi3_geometry, valid_mask)
     dense_geometry = None
     if DENSE_RECONSTRUCTION == "pi3":
         dense_geometry = {
@@ -1203,7 +1275,9 @@ def main() -> None:
         fine_tracking=FINE_TRACKING,
         autocast_dtype=autocast_dtype,
     ).eval()
-    sparse = run_sparse_sfm(images, K, keyframes, frontend, MATCH_VIS_DIR)
+    sparse = run_sparse_sfm(
+        model_images, K, keyframes, frontend, MATCH_VIS_DIR, valid_mask
+    )
 
     dense_points = dense_rgb = dense_frame_ids = None
     track_inliers = torch.ones(
@@ -1216,7 +1290,7 @@ def main() -> None:
         if dense_geometry is None:
             raise RuntimeError("Pi3 dense geometry was not cached")
         dense_points, dense_rgb, dense_frame_ids, track_inliers = (
-            reconstruct_pi3_dense(images, sparse, dense_geometry)
+            reconstruct_pi3_dense(images, sparse, dense_geometry, valid_mask)
         )
 
     torch.save(
@@ -1225,6 +1299,7 @@ def main() -> None:
             "dense_source": DENSE_RECONSTRUCTION,
             "dense_alignment": DENSE_ALIGNMENT,
             "image_paths": [str(path) for path in paths],
+            "valid_mask": None if manual_mask is None else manual_mask.cpu(),
             "world_to_camera": sparse.T_CWs.cpu(),
             "camera_to_world": sparse.T_WCs.cpu(),
             "intrinsics": sparse.Ks.cpu(),

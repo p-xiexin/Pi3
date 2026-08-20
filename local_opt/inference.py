@@ -14,6 +14,7 @@ from PIL import Image
 from pi3.models.pi3 import Pi3
 
 from .glob3r_sfm import Glob3RSfM
+from .image_utils import crop_resize
 
 
 def _natural_sort_key(path: Path):
@@ -127,7 +128,7 @@ def load_image_sequence(
     for path in paths:
         with Image.open(path) as source:
             image = source.convert("RGB")
-            image = image.resize((width, height), resample=Image.Resampling.BICUBIC)
+            image, _, _ = crop_resize(image, np.eye(3), size)
             array = np.asarray(image, dtype=np.float32) / 255.0
         Is.append(torch.from_numpy(array).permute(2, 0, 1))
     return torch.stack(Is), paths
