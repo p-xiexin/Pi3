@@ -1,0 +1,18 @@
+images: data/images
+output: outputs/sfm/result.pt
+# Every source tree and checkpoint below must already exist locally.
+# Checkpoint entries name exact files containing raw state dictionaries.
+backbone_checkpoint: checkpoints/pi3/model.safetensors
+matching_checkpoint: checkpoints/glob3r/model.safetensors
+tracks_model: glob3r  # glob3r or vgg
+# For vgg, root contains both cfgs/ and vggsfm/ from the official checkout.
+vggsfm_root: null
+vggsfm_checkpoint: null
+calibration: null
+mask: null
+device: cuda:0
+image_size: [336, 448]
+window_size: 16
+points_per_keyframe: 512
+local_iterations: 5
+global_iterations: 20
