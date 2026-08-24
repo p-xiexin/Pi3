@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 
 from datasets.base.base_dataset import BaseDataset
+from datasets.sample_utils.index_utils import data_path, load_dataset_index
 
 
 SINTEL_TAG = 202021.25
@@ -43,6 +44,7 @@ class SintelDepthDataset(BaseDataset):
     def __init__(
         self,
         data_root: str | Path,
+        index_file: str | Path = "pi3_index.npy",
         frame_step: int = 1,
         render_pass: str = "final",
         verbose: bool = False,
@@ -50,34 +52,21 @@ class SintelDepthDataset(BaseDataset):
     ) -> None:
         super().__init__(**kwargs)
         self.dataset_label = "SintelDepth"
-        self.data_root = Path(data_root)
+        self.data_root, payload = load_dataset_index(
+            data_root, index_file, "sintel"
+        )
         self.frame_step = int(frame_step)
         if self.frame_step < 1:
             raise ValueError("frame_step must be positive")
         self.render_pass = render_pass
         self.verbose = bool(verbose)
-        training_root = self.data_root / "training"
-        if not training_root.is_dir() and (self.data_root / "sample" / "training").is_dir():
-            training_root = self.data_root / "sample" / "training"
-
-        self.records = []
-        image_root = training_root / render_pass
-        for sequence_dir in sorted(path for path in image_root.iterdir() if path.is_dir()):
-            frames = []
-            for image_path in sorted(sequence_dir.glob("*.png")):
-                stem = image_path.stem
-                depth_path = training_root / "depth" / sequence_dir.name / f"{stem}.dpt"
-                camera_path = training_root / "camdata_left" / sequence_dir.name / f"{stem}.cam"
-                if depth_path.is_file() and camera_path.is_file():
-                    frames.append(
-                        {
-                            "image": image_path,
-                            "depth": depth_path,
-                            "camera": camera_path,
-                        }
-                    )
-            if frames:
-                self.records.append({"sequence_id": sequence_dir.name, "frames": frames})
+        indexed_render_pass = payload.get("render_pass", "final")
+        if render_pass != indexed_render_pass:
+            raise ValueError(
+                f"Sintel index uses render pass {indexed_render_pass!r}, "
+                f"but loader requested {render_pass!r}"
+            )
+        self.records = payload["sequences"]
 
         self.sequences = [record["sequence_id"] for record in self.records]
         self.num_imgs = {
@@ -114,16 +103,19 @@ class SintelDepthDataset(BaseDataset):
         views = []
         for position in positions:
             frame = record["frames"][position]
-            image = np.asarray(Image.open(frame["image"]).convert("RGB"))
-            depth = _read_depth(frame["depth"])
-            intrinsics, camera_pose = _read_camera(frame["camera"])
+            image_path = data_path(self.data_root, frame["image"])
+            depth_path = data_path(self.data_root, frame["depth"])
+            camera_path = data_path(self.data_root, frame["camera"])
+            image = np.asarray(Image.open(image_path).convert("RGB"))
+            depth = _read_depth(depth_path)
+            intrinsics, camera_pose = _read_camera(camera_path)
             image, depth, intrinsics = self._crop_resize_if_necessary(
                 image,
                 depth,
                 intrinsics,
                 resolution,
                 rng=rng,
-                info=str(frame["image"]),
+                info=str(image_path),
             )[:3]
             views.append(
                 {
@@ -133,10 +125,10 @@ class SintelDepthDataset(BaseDataset):
                     "camera_intrinsics": np.asarray(intrinsics, dtype=np.float32),
                     "dataset": self.dataset_label,
                     "label": record["sequence_id"],
-                    "instance": frame["image"].stem,
-                    "image_path": str(frame["image"]),
-                    "depth_path": str(frame["depth"]),
-                    "camera_path": str(frame["camera"]),
+                    "instance": image_path.stem,
+                    "image_path": str(image_path),
+                    "depth_path": str(depth_path),
+                    "camera_path": str(camera_path),
                     "depth_source": "sintel_metric_depth",
                     "pose_source": "sintel_camera_extrinsics",
                 }

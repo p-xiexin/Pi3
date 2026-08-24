@@ -7,6 +7,7 @@ from PIL import Image
 from scipy.spatial.transform import Rotation
 
 from datasets.base.base_dataset import BaseDataset
+from datasets.sample_utils.index_utils import data_path, load_dataset_index
 
 
 TUM_REGISTERED_INTRINSICS = np.array(
@@ -70,6 +71,7 @@ class TUMRGBDPi3XDataset(BaseDataset):
     def __init__(
         self,
         data_root: str | Path,
+        index_file: str | Path = "pi3_index.npy",
         frame_step: int = 1,
         rgb_depth_tolerance: float = 0.02,
         pose_tolerance: float = 0.02,
@@ -79,45 +81,15 @@ class TUMRGBDPi3XDataset(BaseDataset):
     ) -> None:
         super().__init__(**kwargs)
         self.dataset_label = "TUMRGBD"
-        self.data_root = Path(data_root)
+        self.data_root, payload = load_dataset_index(
+            data_root, index_file, "tum_rgbd"
+        )
         self.frame_step = int(frame_step)
         if self.frame_step < 1:
             raise ValueError("frame_step must be positive")
         self.depth_scale = float(depth_scale)
         self.verbose = bool(verbose)
-        self.records: list[dict] = []
-
-        for sequence_dir in _sequence_dirs(self.data_root):
-            rgb = _read_records(sequence_dir / "rgb.txt", 1)
-            depth = _read_records(sequence_dir / "depth.txt", 1)
-            groundtruth = _read_records(sequence_dir / "groundtruth.txt", 7)
-            depth_times = np.asarray([record[0] for record in depth])
-            pose_times = np.asarray([record[0] for record in groundtruth])
-            frames = []
-            for rgb_time, rgb_values in rgb:
-                depth_match = _nearest(
-                    rgb_time, depth, depth_times, rgb_depth_tolerance
-                )
-                pose_match = _nearest(
-                    rgb_time, groundtruth, pose_times, pose_tolerance
-                )
-                if depth_match is None or pose_match is None:
-                    continue
-                frames.append(
-                    {
-                        "timestamp": rgb_time,
-                        "image": sequence_dir / rgb_values[0],
-                        "depth": sequence_dir / depth_match[1][0],
-                        "camera_pose": _pose(pose_match[1]),
-                    }
-                )
-            if frames:
-                self.records.append(
-                    {
-                        "sequence_id": sequence_dir.name,
-                        "frames": frames,
-                    }
-                )
+        self.records: list[dict] = payload["sequences"]
 
         self.sequences = [record["sequence_id"] for record in self.records]
         self.num_imgs = {
@@ -157,15 +129,17 @@ class TUMRGBDPi3XDataset(BaseDataset):
         views = []
         for position in positions:
             frame = record["frames"][position]
-            image = np.asarray(Image.open(frame["image"]).convert("RGB"))
-            depth = np.asarray(Image.open(frame["depth"]), dtype=np.float32) / self.depth_scale
+            image_path = data_path(self.data_root, frame["image"])
+            depth_path = data_path(self.data_root, frame["depth"])
+            image = np.asarray(Image.open(image_path).convert("RGB"))
+            depth = np.asarray(Image.open(depth_path), dtype=np.float32) / self.depth_scale
             image, depth, intrinsics = self._crop_resize_if_necessary(
                 image,
                 depth,
                 TUM_REGISTERED_INTRINSICS.copy(),
                 resolution,
                 rng=rng,
-                info=str(frame["image"]),
+                info=str(image_path),
             )[:3]
             views.append(
                 {
@@ -176,8 +150,8 @@ class TUMRGBDPi3XDataset(BaseDataset):
                     "dataset": self.dataset_label,
                     "label": record["sequence_id"],
                     "instance": f"{frame['timestamp']:.6f}",
-                    "image_path": str(frame["image"]),
-                    "depth_path": str(frame["depth"]),
+                    "image_path": str(image_path),
+                    "depth_path": str(depth_path),
                     "depth_source": "tum_rgbd_registered_depth",
                     "pose_source": "tum_rgbd_motion_capture",
                 }

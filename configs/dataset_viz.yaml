@@ -140,6 +140,7 @@ datasets:
   tum_rgbd:
     _target_: datasets.tum_rgbd_dataset.TUMRGBDPi3XDataset
     data_root: E:/Projects/Pi3/data/tum_rgbd_minimal
+    index_file: E:/Projects/Pi3/data/dataset_cache/tum_rgbd_minimal.npy
     frame_step: 1
     resolution: [[448, 224]]
     frame_num: 8
@@ -153,6 +154,7 @@ datasets:
   redwood:
     _target_: datasets.redwood_rgbd_dataset.RedwoodRGBDDataset
     data_root: E:/Projects/Pi3/data/redwood_minimal
+    index_file: E:/Projects/Pi3/data/dataset_cache/redwood_minimal.npy
     frame_step: 1
     resolution: [[448, 224]]
     frame_num: 5
@@ -165,6 +167,21 @@ datasets:
   eth3d_slam:
     _target_: datasets.eth3d_slam_dataset.ETH3DSLAMDataset
     data_root: E:/Projects/Pi3/data/eth3d_slam_minimal
+    index_file: E:/Projects/Pi3/data/dataset_cache/eth3d_slam_minimal.npy
+    frame_step: 1
+    resolution: [[448, 224]]
+    frame_num: 8
+    z_far: 80
+    mode: test
+    shuffle: false
+    seed: 2026
+    transform: *image_transform
+
+  hypersim:
+    _target_: datasets.hypersim_dataset.HypersimDataset
+    data_root: E:/Projects/Pi3/data/hypersim_minimal
+    index_file: E:/Projects/Pi3/data/dataset_cache/hypersim_minimal.npy
+    cameras: [cam_00]
     frame_step: 1
     resolution: [[448, 224]]
     frame_num: 8
@@ -177,6 +194,7 @@ datasets:
   sintel:
     _target_: datasets.sintel_dataset.SintelDepthDataset
     data_root: E:/Projects/Pi3/data/sintel_minimal/sample
+    index_file: E:/Projects/Pi3/data/dataset_cache/sintel_minimal.npy
     frame_step: 1
     render_pass: final
     resolution: [[448, 224]]

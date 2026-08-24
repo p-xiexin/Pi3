@@ -7,6 +7,7 @@ from PIL import Image
 from scipy.spatial.transform import Rotation
 
 from datasets.base.base_dataset import BaseDataset
+from datasets.sample_utils.index_utils import data_path, load_dataset_index
 
 
 def _read_rows(path: Path, value_count: int) -> list[tuple[float, list[str]]]:
@@ -61,6 +62,7 @@ class ETH3DSLAMDataset(BaseDataset):
     def __init__(
         self,
         data_root: str | Path,
+        index_file: str | Path = "pi3_index.npy",
         frame_step: int = 1,
         pose_tolerance: float = 0.02,
         depth_scale: float = 5000.0,
@@ -69,57 +71,15 @@ class ETH3DSLAMDataset(BaseDataset):
     ) -> None:
         super().__init__(**kwargs)
         self.dataset_label = "ETH3DSLAM"
-        self.data_root = Path(data_root)
+        self.data_root, payload = load_dataset_index(
+            data_root, index_file, "eth3d_slam"
+        )
         self.frame_step = int(frame_step)
         if self.frame_step < 1:
             raise ValueError("frame_step must be positive")
         self.depth_scale = float(depth_scale)
         self.verbose = bool(verbose)
-        self.records = []
-
-        for sequence_dir in _sequence_dirs(self.data_root):
-            calibration = np.fromstring(
-                (sequence_dir / "calibration.txt").read_text(encoding="utf-8"),
-                sep=" ",
-                dtype=np.float32,
-            )
-            if calibration.size != 4:
-                raise ValueError(f"Expected fx fy cx cy in {sequence_dir / 'calibration.txt'}")
-            fx, fy, cx, cy = calibration
-            intrinsics = np.asarray(
-                [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
-                dtype=np.float32,
-            )
-            poses = _read_rows(sequence_dir / "groundtruth.txt", 7)
-            pose_times = np.asarray([pose[0] for pose in poses], dtype=np.float64)
-            frames = []
-            for line_no, line in enumerate(
-                (sequence_dir / "associated.txt").read_text(encoding="utf-8").splitlines(),
-                1,
-            ):
-                parts = line.split()
-                if len(parts) != 4:
-                    raise ValueError(f"{sequence_dir / 'associated.txt'}:{line_no}: expected 4 fields")
-                timestamp = float(parts[0])
-                pose = _nearest_pose(timestamp, poses, pose_times, pose_tolerance)
-                if pose is None:
-                    continue
-                frames.append(
-                    {
-                        "timestamp": timestamp,
-                        "image": sequence_dir / parts[1],
-                        "depth": sequence_dir / parts[3],
-                        "camera_pose": pose,
-                    }
-                )
-            if frames:
-                self.records.append(
-                    {
-                        "sequence_id": sequence_dir.name,
-                        "intrinsics": intrinsics,
-                        "frames": frames,
-                    }
-                )
+        self.records = payload["sequences"]
 
         self.sequences = [record["sequence_id"] for record in self.records]
         self.num_imgs = {
@@ -156,15 +116,17 @@ class ETH3DSLAMDataset(BaseDataset):
         views = []
         for position in positions:
             frame = record["frames"][position]
-            image = np.asarray(Image.open(frame["image"]).convert("RGB"))
-            depth = np.asarray(Image.open(frame["depth"]), dtype=np.float32) / self.depth_scale
+            image_path = data_path(self.data_root, frame["image"])
+            depth_path = data_path(self.data_root, frame["depth"])
+            image = np.asarray(Image.open(image_path).convert("RGB"))
+            depth = np.asarray(Image.open(depth_path), dtype=np.float32) / self.depth_scale
             image, depth, intrinsics = self._crop_resize_if_necessary(
                 image,
                 depth,
                 record["intrinsics"].copy(),
                 resolution,
                 rng=rng,
-                info=str(frame["image"]),
+                info=str(image_path),
             )[:3]
             views.append(
                 {
@@ -174,9 +136,9 @@ class ETH3DSLAMDataset(BaseDataset):
                     "camera_intrinsics": np.asarray(intrinsics, dtype=np.float32),
                     "dataset": self.dataset_label,
                     "label": record["sequence_id"],
-                    "instance": frame["image"].stem,
-                    "image_path": str(frame["image"]),
-                    "depth_path": str(frame["depth"]),
+                    "instance": image_path.stem,
+                    "image_path": str(image_path),
+                    "depth_path": str(depth_path),
                     "depth_source": "eth3d_registered_active_depth",
                     "pose_source": "eth3d_motion_capture",
                 }

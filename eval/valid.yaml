@@ -1,0 +1,85 @@
+model:
+  backbone_checkpoint: ???
+  matching_checkpoint: ???
+
+inference:
+  mixed_precision: bf16
+
+evaluation:
+  chunk_size: 20
+  resolution_index: 0
+  depth_threshold: 0.05
+  charbonnier_epsilon: 1.0e-3
+  charbonnier_alpha: 0.5
+
+visualization:
+  confidence_threshold: 0.6
+  cell_width: 240
+
+dataset_defaults: &dataset_defaults
+  frame_step: 1
+  resolution: [[448, 224]]
+  frame_num: ${evaluation.chunk_size}
+  z_far: 80
+  aug_crop: false
+  aug_focal: false
+  mode: test
+  seed: 2026
+  shuffle: false
+  transform:
+    _partial_: true
+    _target_: datasets.base.transforms.ImgToTensor
+
+datasets:
+  kitti:
+    <<: *dataset_defaults
+    _target_: datasets.kitti_dataset.KITTIPi3XDataset
+    raw_root: ???
+    depth_root: ???
+    index_file: ???
+    cameras: [image_02]
+    splits: [train]
+    splat_radius: 1
+
+  nuscenes:
+    <<: *dataset_defaults
+    _target_: datasets.nuscenes_dataset.NuScenesPi3XDataset
+    data_root: ???
+    index_file: ???
+    version: v1.0-trainval
+    cameras: [CAM_FRONT]
+    map_context: 4
+    splat_radius: 1
+
+  waymo:
+    <<: *dataset_defaults
+    _target_: datasets.waymo_processed_dataset.WaymoPi3XDataset
+    data_root: ???
+    index_file: ???
+    camera_id: 0
+    depth_accumulate: 10
+    splat_radius: 1
+
+  ads:
+    <<: *dataset_defaults
+    _target_: datasets.ads_dataset.AdsDataset
+    obs_path: ???
+    z_far: 40
+    crop: null
+    set_black: null
+    trans_step: 0
+    rot_step: 0
+    input_depth: false
+    use_relative_pose: false
+    aug_T: false
+    twins_method: false
+    rel_pose_perturb: false
+    resize_depth_fine: false
+    extrinsic_trans: null
+    use_all_as_val: false
+
+output_dir: ${hydra:runtime.cwd}/outputs/dataset_eval
+
+hydra:
+  job:
+    chdir: false

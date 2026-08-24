@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 
 from datasets.base.base_dataset import BaseDataset
+from datasets.sample_utils.index_utils import data_path, load_dataset_index
 
 
 def _read_intrinsics(path: Path) -> np.ndarray:
@@ -55,6 +56,7 @@ class RedwoodRGBDDataset(BaseDataset):
     def __init__(
         self,
         data_root: str | Path,
+        index_file: str | Path = "pi3_index.npy",
         frame_step: int = 1,
         depth_scale: float = 1000.0,
         verbose: bool = False,
@@ -62,41 +64,28 @@ class RedwoodRGBDDataset(BaseDataset):
     ) -> None:
         super().__init__(**kwargs)
         self.dataset_label = "RedwoodRGBD"
-        self.data_root = Path(data_root)
+        self.data_root, payload = load_dataset_index(
+            data_root, index_file, "redwood"
+        )
         self.frame_step = int(frame_step)
         if self.frame_step < 1:
             raise ValueError("frame_step must be positive")
         self.depth_scale = float(depth_scale)
         self.verbose = bool(verbose)
 
-        sequence_root = _find_sequence_root(self.data_root)
-        images = sorted((sequence_root / "color").glob("*.jpg"))
-        depths = sorted((sequence_root / "depth").glob("*.png"))
-        poses = _read_trajectory(sequence_root / "trajectory.log")
-        if not images or len(images) != len(depths) or len(images) != len(poses):
-            raise ValueError(
-                f"Redwood RGB, depth and pose counts differ: "
-                f"{len(images)}, {len(depths)}, {len(poses)}"
-            )
-        self.intrinsics = _read_intrinsics(sequence_root / "camera_primesense.json")
-        self.records = [
-            {
-                "image": image,
-                "depth": depth,
-                "camera_pose": pose,
-            }
-            for image, depth, pose in zip(images, depths, poses)
-        ]
-        self.sequences = [sequence_root.name]
-        self.num_imgs = {sequence_root.name: len(self.records)}
+        self.records = payload["sequences"]
+        self.sequences = [record["sequence_id"] for record in self.records]
+        self.num_imgs = {
+            record["sequence_id"]: len(record["frames"]) for record in self.records
+        }
         print(
-            f"[{self.dataset_label}] Found {len(self.records)} frames, "
+            f"[{self.dataset_label}] Found {len(self.records)} sequences, "
             f"frame_step={self.frame_step}",
             flush=True,
         )
 
     def __len__(self) -> int:
-        return 1
+        return len(self.records)
 
     def _sample_positions(self, count: int, rng) -> list[int] | None:
         span = (self.frame_num - 1) * self.frame_step + 1
@@ -107,23 +96,29 @@ class RedwoodRGBDDataset(BaseDataset):
         return [start + index * self.frame_step for index in range(self.frame_num)]
 
     def _get_views(self, index, resolution, rng):
-        positions = self._sample_positions(len(self.records), rng)
-        self.this_views_info = {"scene": self.sequences[0], "idxs": positions or []}
+        record = self.records[int(index)]
+        positions = self._sample_positions(len(record["frames"]), rng)
+        self.this_views_info = {
+            "scene": record["sequence_id"],
+            "idxs": positions or [],
+        }
         if positions is None:
             return []
 
         views = []
         for position in positions:
-            frame = self.records[position]
-            image = np.asarray(Image.open(frame["image"]).convert("RGB"))
-            depth = np.asarray(Image.open(frame["depth"]), dtype=np.float32) / self.depth_scale
+            frame = record["frames"][position]
+            image_path = data_path(self.data_root, frame["image"])
+            depth_path = data_path(self.data_root, frame["depth"])
+            image = np.asarray(Image.open(image_path).convert("RGB"))
+            depth = np.asarray(Image.open(depth_path), dtype=np.float32) / self.depth_scale
             image, depth, intrinsics = self._crop_resize_if_necessary(
                 image,
                 depth,
-                self.intrinsics.copy(),
+                np.asarray(record["intrinsics"], dtype=np.float32).copy(),
                 resolution,
                 rng=rng,
-                info=str(frame["image"]),
+                info=str(image_path),
             )[:3]
             views.append(
                 {
@@ -132,10 +127,10 @@ class RedwoodRGBDDataset(BaseDataset):
                     "camera_pose": frame["camera_pose"].copy(),
                     "camera_intrinsics": np.asarray(intrinsics, dtype=np.float32),
                     "dataset": self.dataset_label,
-                    "label": self.sequences[0],
-                    "instance": frame["image"].stem,
-                    "image_path": str(frame["image"]),
-                    "depth_path": str(frame["depth"]),
+                    "label": record["sequence_id"],
+                    "instance": image_path.stem,
+                    "image_path": str(image_path),
+                    "depth_path": str(depth_path),
                     "depth_source": "redwood_registered_depth",
                     "pose_source": "redwood_trajectory_log",
                 }
