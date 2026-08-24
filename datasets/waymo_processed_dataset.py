@@ -334,7 +334,7 @@ class WaymoPi3XDataset(BaseDataset):
         print(
             f"[{self.dataset_label}] Found {len(self.records)} sequences, "
             f"camera={self.camera_id}, "
-            f"depth_accumulate=±{self.depth_accumulate}",
+            f"depth_accumulate_radius={self.depth_accumulate}",
             flush=True,
         )
 
@@ -381,7 +381,12 @@ class WaymoPi3XDataset(BaseDataset):
                 "scene": record["sequence_id"],
                 "idxs": [],
             }
-            return []
+            required = (self.frame_num - 1) * self.frame_step + 1
+            raise ValueError(
+                f"{record['sequence_id']}: {len(frame_ids)} frames cannot "
+                f"provide frame_num={self.frame_num} with "
+                f"frame_step={self.frame_step}; required span={required}"
+            )
 
         target_ids = [int(frame_ids[p]) for p in positions]
 

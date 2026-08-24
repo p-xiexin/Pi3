@@ -154,8 +154,9 @@ class CO3DV2Dataset(BaseDataset):
             # load image and depth
             rgb_image = np.array(Image.open(impath))
 
-            depthmap = Image.open(depthpath)
-            depthmap = np.frombuffer(np.array(depthmap, dtype=np.uint16), dtype=np.float16).astype(np.float32).reshape((depthmap.shape[0], depthmap.shape[1]))
+            encoded_depth = np.asarray(Image.open(depthpath), dtype=np.uint16)
+            depthmap = encoded_depth.view(np.float16).astype(np.float32)
+            depthmap *= float(anno.get('depth_scale_adjustment', 1.0))
             depthmap = np.nan_to_num(depthmap, nan=0.0, posinf=0.0, neginf=0.0)
 
             # load camera params
@@ -177,8 +178,11 @@ class CO3DV2Dataset(BaseDataset):
 
             if mask_bg:
                 # load object mask
-                maskpath = impath.replace('/images/', '/masks/').replace('.jpg', '.png')
-                maskmap = Image.open(maskpath).astype(np.float32)
+                mask_relative = anno.get('mask_path')
+                if mask_relative is None:
+                    mask_relative = filepath.replace('/images/', '/masks/').replace('.jpg', '.png')
+                maskpath = osp.join(self.data_root, mask_relative)
+                maskmap = np.asarray(Image.open(maskpath), dtype=np.float32)
                 maskmap = (maskmap / 255.0) > 0.1
 
                 # update the depthmap with mask

@@ -133,7 +133,7 @@ class ScannetDataset(BaseDataset):
 
             rgb_image = np.array(Image.open(impath).resize((640, 480), resample=lanczos))
 
-            depthmap = Image.open(disppath).astype(np.float32) / 1000.
+            depthmap = np.asarray(Image.open(disppath), dtype=np.float32) / 1000.
 
             rgb_image, depthmap, intrinsic_ = self._crop_resize_if_necessary(
                 rgb_image, depthmap, intrinsic.copy(), resolution, rng=rng, info=impath)

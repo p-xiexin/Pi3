@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from typing import Any
 
@@ -271,8 +272,16 @@ def is_scene_dir(path: Path) -> bool:
         path.is_dir()
         and (path / "rgb").is_dir()
         and (path / "depth").is_dir()
-        and (path / "trajectory.csv").is_file()
+        and _trajectory_path(path) is not None
     )
+
+
+def _trajectory_path(scene_dir: Path) -> Path | None:
+    for filename in ("trajectory.csv", "trajectory.txt"):
+        path = scene_dir / filename
+        if path.is_file():
+            return path
+    return None
 
 
 def discover_scenes(
@@ -315,6 +324,9 @@ def generate_ase_index(
         unit="scene",
     ):
         scene = scene_dir.relative_to(data_root).as_posix()
+        trajectory_path = _trajectory_path(scene_dir)
+        if trajectory_path is None:
+            continue
 
         rgb_dir = scene_dir / "rgb"
         depth_dir = scene_dir / "depth"
@@ -355,7 +367,7 @@ def generate_ase_index(
             {
                 "sequence_id": scene,
                 "scene_dir": str(scene_dir.resolve()),
-                "trajectory": str((scene_dir / "trajectory.csv").resolve()),
+                "trajectory": str(trajectory_path.resolve()),
                 "frames": frames,
             }
         )
@@ -556,20 +568,24 @@ class AriaSyntheticEnvironmentsPi3XDataset(BaseDataset):
 # =============================================================================
 
 def main():
-    data_root = Path(
-        "/starmap/nas/workspace/pxx/data/ASE"
+    parser = argparse.ArgumentParser(description="Build a lightweight ASE index")
+    parser.add_argument("--data-root", type=Path, default=Path("data/ASE"))
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/dataset_cache/ase_minimal.npy"),
     )
-    output_path = Path(
-        "/starmap/nas/workspace/pxx/Pi3/data/dataset_cache/ase.npy"
-    )
+    parser.add_argument("--chunks", nargs="*")
+    args = parser.parse_args()
 
     index = generate_ase_index(
-        data_root,
-        output_path,
+        args.data_root,
+        args.output,
+        chunks=args.chunks,
     )
 
     print(
-        f"Saved {len(index['sequences'])} scenes to {output_path}"
+        f"Saved {len(index['sequences'])} scenes to {args.output}"
     )
 
 

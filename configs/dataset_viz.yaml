@@ -1,132 +1,193 @@
 datasets:
-  # scannet:
-  #   _target_: datasets.glob3r_scannet_dataset.Glob3RScannetValidationDataset
-  #   data_root: /starmap/nas/workspace/pxx/data/scannet
-  #   index_file: data/dataset_cache/scannet_index.npy
-  #   resolution: [[224, 224]]
-  #   frame_num: 8
-  #   frame_step: 5
-  #   sample_seed: 2026
-  #   transform:
-  #     _partial_: true
-  #     _target_: datasets.base.transforms.ImgToTensor
-  #   mode: train
-  #   seed: 2026
-  # ads:
-  #   _target_: datasets.ads_dataset_clean.AdsDataset
-  #   obs_path: data/dataset_cache/ads.npy
-  #   resolution: [[448, 224]]
-  #   z_far: 80
-  #   frame_num: 8
-  #   aug_crop: 16
-  #   aug_focal: 0.9
-  #   transform:
-  #     _partial_: true
-  #     _target_: datasets.base.transforms.ImgToTensor
-  # rieman:
-  #   _target_: datasets.rieman_dataset_clean.RiemannDataset
-  #   data_root: data/dataset_cache/riemann.npy
-  #   resolution: [[448, 224]]
-  #   z_far: 80
-  #   frame_num: 8
-  #   aug_crop: 16
-  #   aug_focal: 0.9
-  #   transform:
-  #     _partial_: true
-  #     _target_: datasets.base.transforms.ImgToTensor
-  # arkit:
-  #   _target_: datasets.arkit_dataset.ARKitScenesPi3XDataset
-  #   data_root: /starmap/nas/workspace/pxx/data/arkitscenes
-  #   index_file: data/dataset_cache/arkitscenes.npy
-  #   resolution: [[448, 224]]
-  #   z_far: 80
-  #   frame_num: 8
-  #   aug_crop: 16
-  #   aug_focal: 0.9
-  #   transform:
-  #     _partial_: true
-  #     _target_: datasets.base.transforms.ImgToTensor
-  # ase:
-  #   _target_: datasets.ase_dataset.AriaSyntheticEnvironmentsPi3XDataset
-  #   data_root: /starmap/nas/workspace/pxx/data/ASE
-  #   index_file: data/dataset_cache/ase.npy
-  #   resolution: [[448, 224]]
-  #   z_far: 80
-  #   frame_num: 8
-  #   aug_crop: 16
-  #   aug_focal: 0.9
-  #   transform:
-  #     _partial_: true
-  #     _target_: datasets.base.transforms.ImgToTensor
-  # blendmvs:
-  #   _target_: datasets.blendmvs_dataset.BlendedMVSPi3XDataset
-  #   data_root: /starmap/nas/workspace/pxx/data/blendmvs
-  #   index_file: data/dataset_cache/blendedmvs.npy
-  #   resolution: [[448, 224]]
-  #   frame_num: 8
-  #   z_far: 80
-  #   aug_crop: 1
-  #   aug_focal: 1.0
-  #   transform:
-  #     _partial_: true
-  #     _target_: datasets.base.transforms.ImgToTensor
-  # waymo:
-  #   _target_: datasets.waymo_processed_dataset.WaymoPi3XDataset
-  #   data_root: /starmap/nas/workspace/pxx/data/waymo_processed
-  #   index_file: data/dataset_cache/waymo_processed.npy
-  #   resolution: [[448, 224]]
-  #   camera_id: 0
-  #   frame_step: 3
-  #   depth_accumulate: 10
-  #   splat_radius: 0
-  #   frame_num: 8
-  #   z_far: 80
-  #   aug_crop: 1
-  #   aug_focal: 1.0
-  #   transform:
-  #     _partial_: true
-  #     _target_: datasets.base.transforms.ImgToTensor
-  kitti:
-    _target_: datasets.kitti_dataset.KITTIPi3XDataset
-    raw_root: /starmap/nas/workspace/pxx/data/kitti_raw
-    depth_root: /starmap/nas/workspace/pxx/data/kitti_depth
-    index_file: data/dataset_cache/kitti.npy
-    resolution: [[448, 224]]
-    cameras:
-      - image_02
-    splits:
-      - train
-    frame_num: 8
+  waymo:
+    _target_: datasets.waymo_processed_dataset.WaymoPi3XDataset
+    data_root: E:/Projects/Pi3/data/waymo_processed
+    index_file: E:/Projects/Pi3/data/dataset_cache/waymo_processed_sample.npy
+    camera_id: 0
     frame_step: 1
+    depth_accumulate: 10
     splat_radius: 1
+    resolution: [[448, 224]]
+    frame_num: 8
     z_far: 80
     aug_crop: 1
     aug_focal: 1.0
-    transform:
+    mode: test
+    seed: 2026
+    transform: &image_transform
       _partial_: true
       _target_: datasets.base.transforms.ImgToTensor
 
+  scannet_indexed:
+    _target_: datasets.glob3r_scannet_dataset.Glob3RScannetValidationDataset
+    data_root: E:/Projects/Pi3/data/scannet_minimal
+    index_file: E:/Projects/Pi3/data/dataset_cache/scannet_minimal.npy
+    frame_step: 1
+    sample_seed: 2026
+    resolution: [[448, 224]]
+    frame_num: 8
+    mode: train
+    seed: 2026
+    transform: *image_transform
 
-  # nuscenes:
-  #   _target_: datasets.nuscenes_dataset.NuScenesPi3XDataset
-  #   index_file: data/dataset_cache/nuscenes.npy
-  #   data_root: /starmap/nas184/open_source/nuScenes/v1.0-mini
-  #   resolution: [[448, 224]]
-  #   cameras:
-  #   - CAM_FRONT
-  #   frame_step: 1
-  #   map_context: 8
-  #   splat_radius: 1
-  #   z_far: 80
-  #   frame_num: 8
-  #   aug_crop: 16
-  #   aug_focal: 0.9
-  #   transform:
-  #     _partial_: true
-  #     _target_: datasets.base.transforms.ImgToTensor
+  scannet_legacy:
+    _target_: datasets.scannet_dataset.ScannetDataset
+    data_root: E:/Projects/Pi3/data/scannet_legacy_minimal
+    max_distance: 1
+    resolution: [[448, 224]]
+    frame_num: 8
+    mode: train
+    seed: 2026
+    transform: *image_transform
 
+  tartanair:
+    _target_: datasets.tartanair_dataset.TarTanAirDataset
+    data_root: E:/Projects/Pi3/data/tartanair_minimal
+    max_distance: 8
+    resolution: [[448, 224]]
+    frame_num: 8
+    mode: test
+    seed: 2026
+    transform: *image_transform
 
-output_dir: ${hydra:runtime.cwd}/viz/
+  kitti:
+    _target_: datasets.kitti_dataset.KITTIPi3XDataset
+    raw_root: E:/Projects/Pi3/data/kitti_raw_minimal
+    depth_root: E:/Projects/Pi3/data/kitti_depth_minimal
+    index_file: E:/Projects/Pi3/data/dataset_cache/kitti_minimal.npy
+    cameras: [image_02]
+    splits: [train]
+    frame_step: 1
+    splat_radius: 1
+    resolution: [[448, 224]]
+    frame_num: 8
+    z_far: 80
+    aug_crop: 1
+    aug_focal: 1.0
+    mode: test
+    seed: 2026
+    transform: *image_transform
+
+  arkit:
+    _target_: datasets.arkit_dataset.ARKitScenesPi3XDataset
+    data_root: E:/Projects/Pi3/data/arkitscenes_minimal/raw
+    index_file: E:/Projects/Pi3/data/dataset_cache/arkitscenes_minimal.npy
+    frame_step: 1
+    resolution: [[448, 224]]
+    frame_num: 8
+    z_far: 80
+    aug_crop: 1
+    aug_focal: 1.0
+    mode: test
+    seed: 2026
+    transform: *image_transform
+
+  ase:
+    _target_: datasets.ase_dataset.AriaSyntheticEnvironmentsPi3XDataset
+    data_root: E:/Projects/Pi3/data/ASE
+    index_file: E:/Projects/Pi3/data/dataset_cache/ase_minimal.npy
+    frame_step: 1
+    resolution: [[448, 224]]
+    frame_num: 8
+    z_far: 80
+    aug_crop: 1
+    aug_focal: 1.0
+    mode: test
+    seed: 2026
+    transform: *image_transform
+
+  nuscenes:
+    _target_: datasets.nuscenes_dataset.NuScenesPi3XDataset
+    data_root: E:/Projects/Pi3/data/nuscenes_minimal
+    index_file: E:/Projects/Pi3/data/dataset_cache/nuscenes_minimal.npy
+    version: v1.0-mini
+    cameras: [CAM_FRONT]
+    frame_step: 1
+    map_context: 4
+    splat_radius: 1
+    resolution: [[448, 224]]
+    frame_num: 8
+    z_far: 80
+    aug_crop: 1
+    aug_focal: 1.0
+    mode: test
+    seed: 2026
+    transform: *image_transform
+
+  blendedmvs:
+    _target_: datasets.blendmvs_dataset.BlendedMVSPi3XDataset
+    data_root: E:/Projects/Pi3/data/blendedmvs_minimal
+    index_file: E:/Projects/Pi3/data/dataset_cache/blendedmvs_minimal.npy
+    resolution: [[448, 224]]
+    frame_num: 8
+    z_far: 80
+    aug_crop: 1
+    aug_focal: 1.0
+    mode: test
+    seed: 2026
+    transform: *image_transform
+
+  co3dv2:
+    _target_: datasets.co3dv2_dataset.CO3DV2Dataset
+    data_root: E:/Projects/Pi3/data/co3dv2_minimal
+    mask_bg: false
+    resolution: [[448, 224]]
+    frame_num: 8
+    mode: test
+    seed: 2026
+    transform: *image_transform
+
+  tum_rgbd:
+    _target_: datasets.tum_rgbd_dataset.TUMRGBDPi3XDataset
+    data_root: E:/Projects/Pi3/data/tum_rgbd_minimal
+    frame_step: 1
+    resolution: [[448, 224]]
+    frame_num: 8
+    z_far: 80
+    aug_crop: 1
+    aug_focal: 1.0
+    mode: test
+    seed: 2026
+    transform: *image_transform
+
+  redwood:
+    _target_: datasets.redwood_rgbd_dataset.RedwoodRGBDDataset
+    data_root: E:/Projects/Pi3/data/redwood_minimal
+    frame_step: 1
+    resolution: [[448, 224]]
+    frame_num: 5
+    z_far: 80
+    mode: test
+    shuffle: false
+    seed: 2026
+    transform: *image_transform
+
+  eth3d_slam:
+    _target_: datasets.eth3d_slam_dataset.ETH3DSLAMDataset
+    data_root: E:/Projects/Pi3/data/eth3d_slam_minimal
+    frame_step: 1
+    resolution: [[448, 224]]
+    frame_num: 8
+    z_far: 80
+    mode: test
+    shuffle: false
+    seed: 2026
+    transform: *image_transform
+
+  sintel:
+    _target_: datasets.sintel_dataset.SintelDepthDataset
+    data_root: E:/Projects/Pi3/data/sintel_minimal/sample
+    frame_step: 1
+    render_pass: final
+    resolution: [[448, 224]]
+    frame_num: 8
+    z_far: 80
+    mode: test
+    shuffle: false
+    seed: 2026
+    transform: *image_transform
+
+output_dir: ${hydra:runtime.cwd}/outputs/dataset_viz_all
 sample_index: 0
 num_samples: 1
 reference_index: 0

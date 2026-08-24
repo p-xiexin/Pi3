@@ -5,8 +5,6 @@ from datasets.base.base_dataset import BaseDataset
 import os
 import numpy as np
 import os.path as osp
-import h5py
-from utils.basic import seed_anything
 from PIL import Image
 from tqdm import tqdm
 from datasets.base.transforms import *
