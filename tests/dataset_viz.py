@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,8 @@ from PIL import Image, ImageDraw
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from utils.timing import tic, toc
 
 
 @dataclass
@@ -118,7 +121,10 @@ def build_ground_truth_warp(
 
 def _tensor_to_pil(image: torch.Tensor) -> Image.Image:
     array = (
-        image.detach().float().cpu().clamp(0, 1).permute(1, 2, 0).numpy()
+        torch.nan_to_num(image.detach().float().cpu())
+        .clamp(0, 1)
+        .permute(1, 2, 0)
+        .numpy()
         * 255.0
     ).round().astype("uint8")
     return Image.fromarray(array, mode="RGB")
@@ -298,6 +304,64 @@ def render_dataset_geometry(
     return canvas, statistics
 
 
+def _sequence_key(sequence):
+    if isinstance(sequence, list):
+        return tuple(sequence)
+    if hasattr(sequence, "tolist"):
+        value = sequence.tolist()
+        return tuple(value) if isinstance(value, list) else value
+    return sequence
+
+
+def _dataset_volume(dataset) -> dict[str, int]:
+    sequences = list(dataset.sequences)
+
+    for attribute in ("num_imgs", "num_image"):
+        image_counts = getattr(dataset, attribute, None)
+        if isinstance(image_counts, Mapping):
+            num_images = sum(
+                int(image_counts[_sequence_key(sequence)])
+                for sequence in sequences
+            )
+            return {
+                "num_sequences": len(sequences),
+                "num_images": num_images,
+            }
+
+    records = getattr(dataset, "records", None)
+    if records is not None:
+        frame_fields = ("frames", "frame_ids", "view_ids", "sample_tokens")
+        num_images = 0
+        for record in records:
+            for field in frame_fields:
+                if field in record:
+                    num_images += len(record[field])
+                    break
+            else:
+                raise ValueError(
+                    f"Cannot determine image count for {type(dataset).__name__}: "
+                    f"record has fields {sorted(record)}"
+                )
+        return {
+            "num_sequences": len(sequences),
+            "num_images": num_images,
+        }
+
+    raise ValueError(
+        f"Cannot determine sequence and image counts for {type(dataset).__name__}"
+    )
+
+
+def _timing_summary(samples: Sequence[float]) -> dict[str, int | float | list[float]]:
+    total_seconds = sum(samples)
+    return {
+        "num_samples": len(samples),
+        "total_seconds": round(total_seconds, 6),
+        "mean_seconds": round(total_seconds / len(samples), 6) if samples else 0.0,
+        "samples_seconds": list(samples),
+    }
+
+
 @hydra.main(
     version_base="1.2",
     config_path="../configs",
@@ -306,14 +370,24 @@ def render_dataset_geometry(
 def main(cfg: DictConfig) -> None:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_sizes: dict[str, dict[str, int]] = {}
+    sample_timings: dict[str, dict[str, int | float | list[float]]] = {}
+    sample_timings_path = output_dir / "sample_timings.json"
 
     for dataset_name, dataset_cfg in cfg.datasets.items():
         dataset = hydra.utils.instantiate(dataset_cfg)
+        dataset_sizes[dataset_name] = _dataset_volume(dataset)
+        elapsed_samples: list[float] = []
         dataset_output_dir = output_dir / dataset_name
         dataset_output_dir.mkdir(parents=True, exist_ok=True)
 
         for sample_index in range(cfg.sample_index, cfg.sample_index + cfg.num_samples):
-            views = dataset[sample_index]
+            dataset_index = sample_index % len(dataset)
+            tic()
+            views = dataset[dataset_index]
+            elapsed_samples.append(
+                round(toc(f"[{dataset_name}] sample {sample_index}"), 6)
+            )
             overview, statistics = render_dataset_geometry(
                 views,
                 reference_index=cfg.reference_index,
@@ -327,6 +401,20 @@ def main(cfg: DictConfig) -> None:
                 print(f"  {line}")
             if cfg.show:
                 overview.show()
+
+        sample_timings[dataset_name] = _timing_summary(elapsed_samples)
+
+    dataset_sizes_path = output_dir / "dataset_sizes.json"
+    dataset_sizes_path.write_text(
+        json.dumps(dataset_sizes, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    sample_timings_path.write_text(
+        json.dumps(sample_timings, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Dataset sizes -> {dataset_sizes_path.resolve()}")
+    print(f"Sample timings -> {sample_timings_path.resolve()}")
 
 
 if __name__ == "__main__":

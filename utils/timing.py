@@ -17,7 +17,9 @@ def tic() -> None:
     _START_TIME = time.perf_counter()
 
 
-def toc(label: str) -> None:
+def toc(label: str | None = None) -> float:
     _synchronize()
-    elapsed_ms = 1000.0 * (time.perf_counter() - _START_TIME)
-    print(f"{label}: {elapsed_ms:.3f} ms")
+    elapsed_seconds = time.perf_counter() - _START_TIME
+    if label is not None:
+        print(f"{label}: {1000.0 * elapsed_seconds:.3f} ms")
+    return elapsed_seconds

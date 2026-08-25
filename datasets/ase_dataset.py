@@ -500,7 +500,12 @@ class AriaSyntheticEnvironmentsPi3XDataset(BaseDataset):
                 "scene": record["sequence_id"],
                 "idxs": [],
             }
-            return []
+            required = (self.frame_num - 1) * self.frame_step + 1
+            raise ValueError(
+                f"ASE sequence {record['sequence_id']} has {len(frames)} frames, "
+                f"but frame_num={self.frame_num} and frame_step={self.frame_step} "
+                f"require {required} frames"
+            )
 
         self.this_views_info = {
             "scene": record["sequence_id"],

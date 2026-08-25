@@ -8,7 +8,7 @@ import torch
 
 from pi3.models.glob3r.glob3r_training import Glob3R
 
-from .timing import tic, toc
+from utils.timing import tic, toc
 
 
 class Glob3RSfM(Glob3R):

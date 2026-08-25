@@ -316,7 +316,11 @@ class NuScenesPi3XDataset(BaseDataset):
         positions = self._sample_positions(len(record["sample_tokens"]), rng, is_test)
         if positions is None:
             self.this_views_info = {"scene": record["sequence_id"], "idxs": []}
-            return []
+            required = (self.frame_num - 1) * self.frame_step + 1
+            raise ValueError(
+                f"NuScenes sequence {record['sequence_id']} has "
+                f"{len(record['sample_tokens'])} frames, but requires {required}"
+            )
 
         selected_tokens = [record["sample_tokens"][pos] for pos in positions]
         self.this_views_info = {

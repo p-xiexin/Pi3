@@ -154,7 +154,11 @@ class HypersimDataset(BaseDataset):
             "idxs": positions or [],
         }
         if positions is None:
-            return []
+            required = (self.frame_num - 1) * self.frame_step + 1
+            raise ValueError(
+                f"Hypersim sequence {record['sequence_id']} has "
+                f"{len(record['frames'])} frames, but requires {required}"
+            )
 
         frame_lookup, camera_positions, camera_orientations = self._trajectory(record)
         views = []

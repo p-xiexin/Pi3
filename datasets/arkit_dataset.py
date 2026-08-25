@@ -441,7 +441,11 @@ class ARKitScenesPi3XDataset(BaseDataset):
                 "available": len(frames),
                 "idxs": [],
             }
-            return []
+            required = (self.frame_num - 1) * self.frame_step + 1
+            raise ValueError(
+                f"ARKitScenes sequence {scene} has {len(frames)} frames, "
+                f"but requires {required}"
+            )
 
         self.this_views_info = {
             "scene": scene,

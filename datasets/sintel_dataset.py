@@ -98,7 +98,11 @@ class SintelDepthDataset(BaseDataset):
             "idxs": positions or [],
         }
         if positions is None:
-            return []
+            required = (self.frame_num - 1) * self.frame_step + 1
+            raise ValueError(
+                f"Sintel sequence {record['sequence_id']} has "
+                f"{len(record['frames'])} frames, but requires {required}"
+            )
 
         views = []
         for position in positions:

@@ -119,7 +119,11 @@ class TUMRGBDPi3XDataset(BaseDataset):
         positions = self._sample_positions(len(record["frames"]), rng, is_test)
         if positions is None:
             self.this_views_info = {"scene": record["sequence_id"], "idxs": []}
-            return []
+            required = (self.frame_num - 1) * self.frame_step + 1
+            raise ValueError(
+                f"TUM RGB-D sequence {record['sequence_id']} has "
+                f"{len(record['frames'])} frames, but requires {required}"
+            )
         self.this_views_info = {
             "scene": record["sequence_id"],
             "frame_step": self.frame_step,

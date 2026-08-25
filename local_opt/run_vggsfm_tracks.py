@@ -40,7 +40,7 @@ from .pose_graph import (
     robust_rotation_averaging,
 )
 from .sfm import select_keyframes_eq4
-from .timing import tic, toc
+from utils.timing import tic, toc
 
 
 # Temporary experiment settings. Edit these values directly before running.
@@ -967,6 +967,58 @@ def reconstruct_pi3_dense(
     )
 
 
+def _camera_frustum_points(
+    T_WCs: torch.Tensor,
+    scene_points: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sample colored camera-frustum wireframes in world coordinates."""
+
+    lower = torch.quantile(scene_points, 0.05, dim=0)
+    upper = torch.quantile(scene_points, 0.95, dim=0)
+    size = float(torch.linalg.vector_norm(upper - lower)) * 0.03
+    if not math.isfinite(size) or size <= 0:
+        size = 0.1
+    vertices = T_WCs.new_tensor(
+        (
+            (0, 0, 0),
+            (-0.6, -0.4, 1),
+            (0.6, -0.4, 1),
+            (0.6, 0.4, 1),
+            (-0.6, 0.4, 1),
+        )
+    ) * size
+    edges = torch.tensor(
+        ((0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (2, 3), (3, 4), (4, 1)),
+        device=T_WCs.device,
+    )
+    alpha = torch.linspace(0, 1, 12, device=T_WCs.device, dtype=T_WCs.dtype)
+    lines_C = (
+        vertices[edges[:, 0], None] * (1 - alpha[None, :, None])
+        + vertices[edges[:, 1], None] * alpha[None, :, None]
+    ).reshape(-1, 3)
+
+    points, colors, frame_ids = [], [], []
+    denominator = max(T_WCs.shape[0] - 1, 1)
+    for frame, T_WC in enumerate(T_WCs):
+        points.append(
+            torch.einsum("ij,pj->pi", T_WC[:3, :3], lines_C)
+            + T_WC[None, :3, 3]
+        )
+        phase = frame / denominator
+        colors.append(
+            T_WCs.new_tensor((1 - phase, 0.2, phase)).expand(lines_C.shape[0], -1)
+        )
+        frame_ids.append(
+            torch.full(
+                (lines_C.shape[0],),
+                frame,
+                device=T_WCs.device,
+                dtype=torch.long,
+            )
+        )
+    return torch.cat(points), torch.cat(colors), torch.cat(frame_ids)
+
+
 def save_vggsfm_matching_matrix(
     output_dir: str | Path,
     images: torch.Tensor,
@@ -1336,6 +1388,15 @@ def main() -> None:
             dense_rgb,
             {"frame_id": dense_frame_ids},
         )
+    camera_points, camera_rgb, camera_ids = _camera_frustum_points(
+        sparse.T_WCs, sparse.Xs_W
+    )
+    save_ply(
+        output.parent / "camera_poses.ply",
+        camera_points,
+        camera_rgb,
+        {"frame_id": camera_ids},
+    )
     print(f"Selected query frames {sparse.keyframes.tolist()}")
     print(f"Saved VGGSfM-track validation to {output}")
 
