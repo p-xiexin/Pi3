@@ -1,5 +1,7 @@
 images: data/images
 output: outputs/sfm/result.pt
+# External BA compatibility bundle containing doc.xml and binary track PLY files.
+tracks_output: outputs/sfm/tracks
 # Every source tree and checkpoint below must already exist locally.
 # Checkpoint entries name exact files containing raw state dictionaries.
 backbone_checkpoint: checkpoints/pi3/model.safetensors
@@ -16,3 +18,4 @@ window_size: 16
 points_per_keyframe: 512
 local_iterations: 5
 global_iterations: 20
+global_ba_backend: native  # native or colmap

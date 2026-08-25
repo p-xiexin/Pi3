@@ -217,15 +217,25 @@ class FactorGraph:
             self.poses[frame_id] = pose
         self.point_initialized[:self.point_count] = False
 
-    def optimize(self, view, fixed_ids, iterations):
+    def optimize(self, view, fixed_ids, iterations, backend="native"):
         """Run the shared BA backend and commit its state to the persistent graph."""
         local = {int(frame_id): i for i, frame_id in enumerate(view["frame_ids"].tolist())}
         fixed = [local[int(frame_id)] for frame_id in fixed_ids if int(frame_id) in local]
         if not fixed:
             raise ValueError("optimization requires at least one fixed camera")
-        result = optimize_view(view, fixed, iterations)
+        if backend == "native":
+            result = optimize_view(view, fixed, iterations)
+            result["ba_backend"] = "native"
+        elif backend == "colmap":
+            from .colmap_optimizer import optimize_view_colmap
+            result = optimize_view_colmap(view, fixed, iterations)
+        else:
+            raise ValueError(f"unsupported BA backend {backend}")
         for frame_id, pose in zip(view["frame_ids"].tolist(), result["poses"]):
             self.poses[int(frame_id)] = pose
+        if "K" in result:
+            for frame_id, K in zip(view["frame_ids"].tolist(), result["K"]):
+                self.intrinsics[int(frame_id)] = K
         self.point_positions[view["point_ids"]] = result["points"]
         self.point_initialized[view["point_ids"]] = True
         result["frame_ids"] = view["frame_ids"]

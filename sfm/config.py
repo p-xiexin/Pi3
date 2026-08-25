@@ -26,6 +26,9 @@ def load_config(path):
         raise ValueError("window_size must be at least three for three-view tracks")
     if config["tracks_model"] not in {"glob3r", "vgg"}:
         raise ValueError("tracks_model must be glob3r or vgg")
+    config["global_ba_backend"] = config.get("global_ba_backend", "native")
+    if config["global_ba_backend"] not in {"native", "colmap"}:
+        raise ValueError("global_ba_backend must be native or colmap")
     model_keys = {
         "glob3r": ("matching_checkpoint",),
         "vgg": ("vggsfm_root", "vggsfm_checkpoint"),

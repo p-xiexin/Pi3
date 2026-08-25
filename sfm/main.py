@@ -17,6 +17,7 @@ from .features import (
 )
 from .model import load_models
 from .reconstruction import reconstruct
+from .tracks_export import save_ba_tracks
 from .tracker import (
     KEYFRAME_MATCH_COVERAGE_RATIO,
     FrameStore,
@@ -66,17 +67,36 @@ def run(config):
     # the sliding windows. Full BA then uses every eligible observation.
     graph.initialize_global()
     view = graph.full_view()
-    result = graph.optimize(view, [0], config["global_iterations"])
+    output = Path(config["output"])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    native_K = torch.as_tensor(
+        dataset.native_K, device=view["K"].device, dtype=view["K"].dtype
+    ).expand(view["K"].shape[0], -1, -1)
+    processed_to_native = native_K @ torch.linalg.inv(view["K"])
+    tracks_output = Path(config.get("tracks_output", output.parent / "tracks"))
+    tracks_summary = save_ba_tracks(
+        tracks_output, view, frames, pixel_transforms=processed_to_native
+    )
     print(
-        f"global cameras={view['poses'].shape[0]} points={view['points'].shape[0]} "
+        f"tracks cameras={tracks_summary['camera_count']} "
+        f"points={tracks_summary['point_count']} "
+        f"observations={tracks_summary['observation_count']} "
+        f"path={tracks_summary['path']}"
+    )
+    # The external BA consumes the exported global graph input. This local
+    # optimizer remains a numerical and geometric validation of that input.
+    result = graph.optimize(
+        view, [0], config["global_iterations"], backend=config["global_ba_backend"]
+    )
+    print(
+        f"global backend={result['ba_backend']} "
+        f"cameras={view['poses'].shape[0]} points={view['points'].shape[0]} "
         f"observations={view['ii'].numel()} "
         f"valid={int(result['valid_observations'])}/{view['ii'].numel()} "
         f"loss={float(result['loss']):.6g} "
         f"loss_per_pixel={float(result['loss_per_pixel']):.6g}"
     )
     reconstruction = reconstruct(graph, frames)
-    output = Path(config["output"])
-    output.parent.mkdir(parents=True, exist_ok=True)
     frame_ids = sorted(graph.poses)
     poses = torch.stack([graph.poses[frame_id] for frame_id in frame_ids])
     edge_source = torch.tensor([edge[0] for edge in graph.edges])
@@ -112,6 +132,8 @@ def run(config):
             "observation_points": view["point_ids"][view["jj"]].cpu(),
             "observation_uv": view["uv"].cpu(),
             "observation_weight": view["weight"].cpu(),
+            "ba_backend": result["ba_backend"],
+            "distortion": result.get("distortion", view["distortion"]).cpu(),
             "loss": result["loss"].cpu(),
             "loss_per_pixel": result["loss_per_pixel"].cpu(),
             "valid_observations": result["valid_observations"].cpu(),
