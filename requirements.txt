@@ -4,7 +4,7 @@ numpy==1.26.4
 pillow
 opencv-python
 plyfile
-pycolmap
+pycolmap==4.1.1
 huggingface_hub
 safetensors
 tensorboard

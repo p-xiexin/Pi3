@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from sfm.colmap_optimizer import optimize_view_colmap
+from sfm.colmap_optimizer import _load_pycolmap, optimize_view_colmap
 from sfm.factor_graph import FactorGraph
 from sfm.optimizer import _project
 
@@ -19,9 +19,14 @@ class _Rotation3d:
 
 
 class _Rigid3d:
-    def __init__(self, rotation, translation):
-        self.rotation = rotation
-        self.translation = np.asarray(translation, dtype=np.float64).copy()
+    def __init__(self, rotation, translation=None):
+        if translation is None:
+            matrix = np.asarray(rotation, dtype=np.float64)
+            self.rotation = _Rotation3d(matrix[:3, :3])
+            self.translation = matrix[:3, 3].copy()
+        else:
+            self.rotation = rotation
+            self.translation = np.asarray(translation, dtype=np.float64).copy()
 
 
 class _Track:
@@ -38,7 +43,7 @@ class _Reconstruction:
         self.images = {}
         self.points3D = {}
 
-    def add_camera(self, camera):
+    def add_camera_with_trivial_rig(self, camera):
         self.cameras[camera.camera_id] = camera
 
     def add_point3D(self, xyz, track, color):
@@ -48,19 +53,44 @@ class _Reconstruction:
         )
         return point_id
 
-    def add_image(self, image):
+    def add_image_with_trivial_frame(self, image, cam_from_world):
+        image.frame_id = image.image_id
+        image._cam_from_world = cam_from_world
+        image.has_pose = True
         self.images[image.image_id] = image
+
+    def reg_image_ids(self):
+        return list(self.images)
 
 
 class _BundleAdjustmentOptions:
     def __init__(self):
-        self.loss_function_scale = None
-        self.loss_function_type = None
         self.refine_principal_point = False
         self.refine_extra_params = False
-        self.refine_extrinsics = False
+        self.refine_rig_from_world = False
+        self.refine_sensor_from_rig = True
         self.refine_focal_length = False
-        self.solver_options = SimpleNamespace(max_num_iterations=None)
+        self.ceres = SimpleNamespace(
+            loss_function_scale=None,
+            loss_function_type=None,
+            solver_options=SimpleNamespace(max_num_iterations=None),
+        )
+
+
+class _BundleAdjustmentConfig:
+    def __init__(self):
+        self.images = set()
+        self.constant_frames = set()
+        self.fixed_gauge = None
+
+    def add_image(self, image_id):
+        self.images.add(image_id)
+
+    def set_constant_rig_from_world_pose(self, frame_id):
+        self.constant_frames.add(frame_id)
+
+    def fix_gauge(self, gauge):
+        self.fixed_gauge = gauge
 
 
 class ColmapOptimizerTest(unittest.TestCase):
@@ -81,18 +111,32 @@ class ColmapOptimizerTest(unittest.TestCase):
                 self.point3D_id = point3D_id
 
         class Image:
-            def __init__(self, image_id, name, camera_id, cam_from_world, points2D):
+            def __init__(self, image_id, name, camera_id, points2D):
                 self.image_id = image_id
                 self.name = name
                 self.camera_id = camera_id
-                self.cam_from_world = cam_from_world
                 self.points2D = points2D
-                self.registered = False
+                self.frame_id = None
+                self.has_pose = False
 
-        def bundle_adjustment(reconstruction, options):
-            state.called = True
+            def cam_from_world(self):
+                return self._cam_from_world
+
+        def create_default_bundle_adjuster(options, config, reconstruction):
             state.reconstruction = reconstruction
             state.options = options
+            state.config = config
+
+            class Adjuster:
+                @staticmethod
+                def solve():
+                    state.called = True
+                    return SimpleNamespace(
+                        is_solution_usable=lambda: True,
+                        brief_report=lambda: "ok",
+                    )
+
+            return Adjuster()
 
         module = SimpleNamespace(
             Reconstruction=_Reconstruction,
@@ -101,13 +145,31 @@ class ColmapOptimizerTest(unittest.TestCase):
             Rotation3d=_Rotation3d,
             Rigid3d=_Rigid3d,
             Point2D=Point2D,
-            ListPoint2D=list,
+            Point2DList=list,
             Image=Image,
             BundleAdjustmentOptions=_BundleAdjustmentOptions,
+            BundleAdjustmentConfig=_BundleAdjustmentConfig,
+            BundleAdjustmentGauge=SimpleNamespace(TWO_CAMS_FROM_WORLD="two_cameras"),
             LossFunctionType=SimpleNamespace(CAUCHY="cauchy"),
-            bundle_adjustment=bundle_adjustment,
+            create_default_bundle_adjuster=create_default_bundle_adjuster,
         )
         return module, state
+
+    def test_backend_requires_pycolmap_4_1_1(self):
+        incompatible = SimpleNamespace(COLMAP_version="COLMAP 3.10")
+        with patch(
+            "sfm.colmap_optimizer.importlib.import_module",
+            return_value=incompatible,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "requires pycolmap 4.1.1"):
+                _load_pycolmap()
+
+        compatible = SimpleNamespace(COLMAP_version="COLMAP 4.1.1")
+        with patch(
+            "sfm.colmap_optimizer.importlib.import_module",
+            return_value=compatible,
+        ):
+            self.assertIs(_load_pycolmap(), compatible)
 
     def test_colmap_backend_builds_tracks_and_returns_comparable_tensors(self):
         dtype = torch.float64
@@ -138,13 +200,17 @@ class ColmapOptimizerTest(unittest.TestCase):
             result = optimize_view_colmap(view, [0], 7)
 
         self.assertTrue(state.called)
-        self.assertEqual(state.options.loss_function_scale, 2.0)
-        self.assertEqual(state.options.loss_function_type, "cauchy")
+        self.assertEqual(state.options.ceres.loss_function_scale, 2.0)
+        self.assertEqual(state.options.ceres.loss_function_type, "cauchy")
         self.assertTrue(state.options.refine_principal_point)
         self.assertTrue(state.options.refine_extra_params)
-        self.assertTrue(state.options.refine_extrinsics)
+        self.assertTrue(state.options.refine_rig_from_world)
+        self.assertFalse(state.options.refine_sensor_from_rig)
         self.assertTrue(state.options.refine_focal_length)
-        self.assertEqual(state.options.solver_options.max_num_iterations, 7)
+        self.assertEqual(state.options.ceres.solver_options.max_num_iterations, 7)
+        self.assertEqual(state.config.images, {1, 2, 3})
+        self.assertEqual(state.config.constant_frames, {1})
+        self.assertEqual(state.config.fixed_gauge, "two_cameras")
         self.assertEqual(len(state.reconstruction.cameras), 1)
         self.assertEqual(len(state.reconstruction.images), 3)
         self.assertEqual(len(state.reconstruction.points3D), 2)
