@@ -5,6 +5,10 @@ import torch
 from .geometry import camera_centers, se3_exp
 
 
+MAX_REPROJECTION_ERROR_PX = 4.0
+MIN_TRACK_OBSERVATIONS = 3
+
+
 def _robust_weight(residual, confidence, delta):
     """Return confidence-weighted Huber influence values per observation."""
     norm = residual.norm(dim=-1).clamp_min(1.0e-8)
@@ -152,12 +156,16 @@ def _schur_step(Jc, Jx, rhs, weight, ii, jj, camera_count, point_count, fixed, g
     return dc, dpoints
 
 
-def _select_scale_gauge(centers, fixed):
+def _select_scale_gauge(centers, fixed, active=None):
     """Choose a well-separated camera to preserve the initial monocular scale."""
-    fixed_ids = torch.nonzero(fixed, as_tuple=False).squeeze(-1)
+    if active is None:
+        active = torch.ones_like(fixed)
+    fixed_ids = torch.nonzero(fixed & active, as_tuple=False).squeeze(-1)
+    if not fixed_ids.numel():
+        return None
     root = int(fixed_ids[0])
     offsets = centers - centers[root]
-    candidates = torch.nonzero(~fixed, as_tuple=False).squeeze(-1)
+    candidates = torch.nonzero((~fixed) & active, as_tuple=False).squeeze(-1)
     lengths = offsets[candidates].norm(dim=-1)
     if not candidates.numel() or lengths.max() <= 1.0e-6:
         return None
@@ -181,22 +189,43 @@ def _scale_factor(gauge, centers, poses, pose):
     return camera, jacobian, residual, 1.0e3
 
 
-@torch.no_grad()
-def optimize_view(view, fixed_ids, iterations):
-    """Optimize translation and points first, then run full reprojection BA."""
-    poses = view["poses"].clone()
-    points = view["points"].clone()
-    ii, jj = view["ii"], view["jj"]
+def _fixed_camera_mask(poses, fixed_ids):
+    """Build and validate the camera gauge mask shared by both BA entrypoints."""
     fixed = torch.zeros(poses.shape[0], device=poses.device, dtype=torch.bool)
+    fixed_ids = torch.as_tensor(fixed_ids, device=poses.device, dtype=torch.long)
+    if fixed_ids.numel() == 0:
+        raise ValueError("optimization requires at least one fixed camera")
+    if bool(((fixed_ids < 0) | (fixed_ids >= poses.shape[0])).any()):
+        raise IndexError("fixed camera index lies outside the optimizer view")
     fixed[fixed_ids] = True
+    return fixed
+
+
+def _stage_fixed_camera_mask(fixed, observation_cameras, camera_count):
+    """Freeze cameras without measurements and keep one measured gauge camera."""
+    active = torch.bincount(
+        observation_cameras, minlength=camera_count
+    ) > 0
+    if not bool(active.any()):
+        raise RuntimeError("optimization stage has no camera observations")
+    stage_fixed = fixed | ~active
+    if not bool((fixed & active).any()):
+        stage_fixed[torch.nonzero(active, as_tuple=False)[0, 0]] = True
+    return stage_fixed, active
+
+
+def _bearing_adjust(poses, points, view, fixed, iterations):
+    """Run the Eq. (5)-style center and landmark refinement."""
+    ii, jj = view["ii"], view["jj"]
+    fixed, active = _stage_fixed_camera_mask(fixed, ii, poses.shape[0])
     centers = camera_centers(poses)
-    scale_gauge = _select_scale_gauge(centers, fixed)
+    scale_gauge = _select_scale_gauge(centers, fixed, active)
     rotations = poses[:, :3, :3].clone()
     uv1 = torch.cat((view["uv"], torch.ones_like(view["uv"][:, :1])), -1)
     rays_camera = torch.einsum("oij,oj->oi", torch.linalg.inv(view["K"])[ii], uv1)
-    rays_world = torch.einsum("oij,oj->oi", rotations[ii].transpose(-1, -2), rays_camera)
-    # Bearing-space initialization adjusts centers and landmarks while keeping
-    # network rotations fixed. It provides a stable starting point for pixel BA.
+    rays_world = torch.einsum(
+        "oij,oj->oi", rotations[ii].transpose(-1, -2), rays_camera
+    )
     for _ in range(int(iterations)):
         rays = rays_world / rays_world.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
         eye = torch.eye(3, device=poses.device, dtype=poses.dtype)
@@ -204,26 +233,175 @@ def optimize_view(view, fixed_ids, iterations):
         error = torch.einsum("oij,oj->oi", projector, points[jj] - centers[ii])
         weight = _robust_weight(error, view["weight"], 1.0)
         dc, dpoints = _schur_step(
-            -projector, projector, -error, weight, ii, jj, poses.shape[0], points.shape[0], fixed,
+            -projector,
+            projector,
+            -error,
+            weight,
+            ii,
+            jj,
+            poses.shape[0],
+            points.shape[0],
+            fixed,
             _scale_factor(scale_gauge, centers, poses, False),
         )
         centers += dc
         points += dpoints
     poses[:, :3, 3] = -torch.einsum("sij,sj->si", rotations, centers)
-    # The second stage jointly refines SE(3) poses and 3D landmarks against the
-    # same observations used by local and global graph views.
+    return poses, points
+
+
+def _bundle_adjust(poses, points, view, fixed, iterations, observation_ids=None):
+    """Run matrix-free reprojection BA over all or a selected set of observations."""
+    if observation_ids is None:
+        observation_ids = torch.arange(
+            view["ii"].numel(), device=view["ii"].device, dtype=torch.long
+        )
+    else:
+        observation_ids = torch.as_tensor(
+            observation_ids, device=view["ii"].device, dtype=torch.long
+        )
+    if observation_ids.numel() == 0:
+        raise RuntimeError("reprojection BA received no observations")
+    ii = view["ii"][observation_ids]
+    jj = view["jj"][observation_ids]
+    uv = view["uv"][observation_ids]
+    confidence = view["weight"][observation_ids]
+    fixed, active = _stage_fixed_camera_mask(fixed, ii, poses.shape[0])
+    scale_gauge = _select_scale_gauge(camera_centers(poses), fixed, active)
     for _ in range(int(iterations)):
         projection, valid, (Jc, Jx) = _project(
             poses, points, view["K"], view["distortion"], ii, jj, True
         )
-        residual = torch.where(valid[:, None], view["uv"] - projection, 0)
-        weight = _robust_weight(residual, view["weight"], 2.0) * valid
+        residual = torch.where(valid[:, None], uv - projection, 0)
+        weight = _robust_weight(residual, confidence, 2.0) * valid
         dpose, dpoints = _schur_step(
-            Jc, Jx, residual, weight, ii, jj, poses.shape[0], points.shape[0], fixed,
-            _scale_factor(scale_gauge, camera_centers(poses), poses, True),
+            Jc,
+            Jx,
+            residual,
+            weight,
+            ii,
+            jj,
+            poses.shape[0],
+            points.shape[0],
+            fixed,
+            _scale_factor(
+                scale_gauge, camera_centers(poses), poses, True
+            ),
         )
         poses = se3_exp(dpose) @ poses
         points += dpoints
+    return poses, points
+
+
+@torch.no_grad()
+def filter_reprojection_observations(
+    view,
+    poses,
+    points,
+    max_error_px=MAX_REPROJECTION_ERROR_PX,
+    min_observations=MIN_TRACK_OBSERVATIONS,
+    observation_ids=None,
+):
+    """Apply the local_opt positive-depth, finite, 4 px and track-support gates.
+
+    The returned masks retain the indexing of the input view.  Passing
+    ``observation_ids`` restricts the candidate set while preserving that full
+    indexing, which lets the second BA round refine only first-round inliers.
+    """
+    if max_error_px < 0:
+        raise ValueError("max_error_px must be non-negative")
+    if int(min_observations) < 1:
+        raise ValueError("min_observations must be positive")
+    observation_count = int(view["ii"].numel())
+    if observation_ids is None:
+        observation_ids = torch.arange(
+            observation_count, device=view["ii"].device, dtype=torch.long
+        )
+    else:
+        observation_ids = torch.as_tensor(
+            observation_ids, device=view["ii"].device, dtype=torch.long
+        )
+    if observation_ids.numel() == 0:
+        raise RuntimeError("reprojection filtering received no observations")
+    if bool(((observation_ids < 0) | (observation_ids >= observation_count)).any()):
+        raise IndexError("observation index lies outside the optimizer view")
+
+    ii = view["ii"][observation_ids]
+    jj = view["jj"][observation_ids]
+    projection, _ = _project(
+        poses, points, view["K"], view["distortion"], ii, jj
+    )
+    rotations, translations = poses[ii, :3, :3], poses[ii, :3, 3]
+    camera_points = torch.einsum("oij,oj->oi", rotations, points[jj]) + translations
+    error = torch.linalg.vector_norm(
+        projection - view["uv"][observation_ids], dim=-1
+    )
+    local_inliers = (
+        torch.isfinite(projection).all(-1)
+        & torch.isfinite(error)
+        & torch.isfinite(camera_points[:, 2])
+        & (camera_points[:, 2] > 0)
+        & (error <= float(max_error_px))
+    )
+    support = torch.bincount(
+        jj[local_inliers], minlength=points.shape[0]
+    )
+    point_inliers = support >= int(min_observations)
+    references = view.get("references")
+    if references is not None:
+        references = torch.as_tensor(
+            references, device=ii.device, dtype=torch.long
+        )
+        if references.shape != (points.shape[0],):
+            raise ValueError("optimizer references must have shape [points]")
+        owner_in_view = references >= 0
+        if bool((references[owner_in_view] >= view["poses"].shape[0]).any()):
+            raise IndexError("optimizer reference camera lies outside the view")
+        owner_supported = torch.ones_like(point_inliers)
+        owner_observations = local_inliers & (ii == references[jj])
+        owner_supported[owner_in_view] = (
+            torch.bincount(
+                jj[owner_observations], minlength=points.shape[0]
+            )[owner_in_view]
+            > 0
+        )
+        point_inliers &= owner_supported
+    local_inliers &= point_inliers[jj]
+    if not bool(point_inliers.any()):
+        raise RuntimeError("post-BA filtering rejected every sparse point")
+
+    observation_inliers = torch.zeros(
+        observation_count, device=ii.device, dtype=torch.bool
+    )
+    observation_inliers[observation_ids] = local_inliers
+    reprojection_error = torch.full(
+        (observation_count,),
+        float("inf"),
+        device=error.device,
+        dtype=error.dtype,
+    )
+    reprojection_error[observation_ids] = error
+    return {
+        "observation_inliers": observation_inliers,
+        "point_inliers": point_inliers,
+        "reprojection_error": reprojection_error,
+        "support": support,
+    }
+
+
+@torch.no_grad()
+def optimize_view(view, fixed_ids, iterations):
+    """Optimize translation and points first, then run full reprojection BA."""
+    poses = view["poses"].clone()
+    points = view["points"].clone()
+    ii, jj = view["ii"], view["jj"]
+    fixed = _fixed_camera_mask(poses, fixed_ids)
+    # Bearing-space initialization adjusts centers and landmarks while keeping
+    # network rotations fixed. It provides a stable starting point for pixel BA.
+    poses, points = _bearing_adjust(poses, points, view, fixed, iterations)
+    # The second stage jointly refines SE(3) poses and 3D landmarks against the
+    # same observations used by local and global graph views.
+    poses, points = _bundle_adjust(poses, points, view, fixed, iterations)
     projection, valid = _project(poses, points, view["K"], view["distortion"], ii, jj)
     valid_observations = valid.sum()
     if not bool(valid_observations):
@@ -241,4 +419,95 @@ def optimize_view(view, fixed_ids, iterations):
     }
 
 
-__all__ = ["optimize_view"]
+@torch.no_grad()
+def optimize_view_two_rounds(
+    view,
+    fixed_ids,
+    bearing_iterations=15,
+    first_iterations=20,
+    second_iterations=10,
+    max_error_px=MAX_REPROJECTION_ERROR_PX,
+    min_observations=MIN_TRACK_OBSERVATIONS,
+):
+    """Run Eq. (5), BA, hard filtering, a second BA, and final filtering.
+
+    Poses and points retain the compact view indexing.  Observation and point
+    masks retain their original lengths so callers can map them back to the
+    persistent graph without rebuilding IDs.
+    """
+    poses = view["poses"].clone()
+    points = view["points"].clone()
+    fixed = _fixed_camera_mask(poses, fixed_ids)
+    poses, points = _bearing_adjust(
+        poses, points, view, fixed, bearing_iterations
+    )
+    poses, points = _bundle_adjust(
+        poses, points, view, fixed, first_iterations
+    )
+    first = filter_reprojection_observations(
+        view,
+        poses,
+        points,
+        max_error_px=max_error_px,
+        min_observations=min_observations,
+    )
+    first_ids = torch.nonzero(
+        first["observation_inliers"], as_tuple=False
+    ).squeeze(-1)
+    poses, points = _bundle_adjust(
+        poses,
+        points,
+        view,
+        fixed,
+        second_iterations,
+        observation_ids=first_ids,
+    )
+    final = filter_reprojection_observations(
+        view,
+        poses,
+        points,
+        max_error_px=max_error_px,
+        min_observations=min_observations,
+        observation_ids=first_ids,
+    )
+    final_ids = torch.nonzero(
+        final["observation_inliers"], as_tuple=False
+    ).squeeze(-1)
+    projection, _ = _project(
+        poses,
+        points,
+        view["K"],
+        view["distortion"],
+        view["ii"][final_ids],
+        view["jj"][final_ids],
+    )
+    loss = _robust_loss(
+        view["uv"][final_ids] - projection,
+        view["weight"][final_ids],
+        2.0,
+    )
+    valid_observations = final["observation_inliers"].sum()
+    return {
+        "poses": poses,
+        "points": points,
+        "loss": loss,
+        "loss_per_pixel": loss / valid_observations.to(loss.dtype),
+        "valid_observations": valid_observations,
+        "input_observations": torch.as_tensor(
+            view["ii"].numel(), device=poses.device, dtype=torch.long
+        ),
+        "first_inlier_observations": first["observation_inliers"].sum(),
+        "observation_inliers": final["observation_inliers"],
+        "first_point_inliers": first["point_inliers"],
+        "point_inliers": final["point_inliers"],
+        "reprojection_error": final["reprojection_error"],
+    }
+
+
+__all__ = [
+    "MAX_REPROJECTION_ERROR_PX",
+    "MIN_TRACK_OBSERVATIONS",
+    "filter_reprojection_observations",
+    "optimize_view",
+    "optimize_view_two_rounds",
+]

@@ -1,5 +1,7 @@
 images: data/images
-output: outputs/sfm/result.pt
+data_h5: outputs/sfm/data.h5
+# Incremental RGB SALAD retrieval and loop matching packets only.
+data_loop_h5: outputs/sfm/data_loop.h5
 # External BA compatibility bundle containing doc.xml and binary track PLY files.
 tracks_output: outputs/sfm/tracks
 # Every source tree and checkpoint below must already exist locally.
@@ -10,12 +12,26 @@ tracks_model: glob3r  # glob3r or vgg
 # For vgg, root contains both cfgs/ and vggsfm/ from the official checkout.
 vggsfm_root: null
 vggsfm_checkpoint: null
+# Glob3R C.1 uses RGB DINOv2 SALAD and a strict cosine threshold of 0.5.
+loop: True
+dino_salad_checkpoint: checkpoints/dino_salad.ckpt
+loop_similarity_threshold: 0.5
+loop_batch_size: 16
 calibration: null
 mask: null
 device: cuda:0
-image_size: [336, 448]
+random_seed: 0
+image_size: [378, 672]
 window_size: 16
-points_per_keyframe: 512
+# Both frontends use the global-top SuperPoint and SIFT queries from run_vggsfm_tracks.py.
+points_per_keyframe: 2048
+superpoint_detection_threshold: 0.005
+vgg_track_visibility_threshold: 0.05
+vgg_track_score_threshold: 0.5
+pi3_mask_confidence_threshold: 0.3
+keyframe_projection_threshold: 0.7
+keyframe_confidence_threshold: 0.1
+keyframe_max_interval: 5
 local_iterations: 5
 global_iterations: 20
 global_ba_backend: native  # native or colmap

@@ -1,17 +1,35 @@
-"""Sliding-window geometry, shared SIFT queries, and tracks factor extraction."""
+"""Sliding-window geometry, stable image queries, and verified track factors."""
+
+from dataclasses import dataclass
 
 import torch
 
+from .geometric_verification import verify_packet
+from .keyframes import select_keyframes_eq4_window
 from .tracks import sample_map
 
 
 PI3_VALID_CONFIDENCE = 0.1
-KEYFRAME_PROJECTION_RATIO = 0.5
-KEYFRAME_MATCH_COVERAGE_RATIO = 0.5
+PI3_MASK_CONFIDENCE = 0.3
+
+
+@dataclass(frozen=True)
+class WindowState:
+    """One decoded window with the masks consumed by tracking and keyframing."""
+
+    frame_ids: tuple
+    images: torch.Tensor
+    track_images: torch.Tensor
+    points: torch.Tensor
+    confidence: torch.Tensor
+    dense_confidence: torch.Tensor
+    track_valid_mask: torch.Tensor
+    poses: torch.Tensor
+    K: torch.Tensor
 
 
 class FrameStore:
-    """Persist keyframe geometry and SIFT anchors across overlapping windows."""
+    """Persist dense frame geometry and stable keyframe query identities."""
 
     def __init__(self, dataset):
         self.paths = dataset.paths
@@ -20,18 +38,45 @@ class FrameStore:
         self.keyframes = set()
         self.dense = {}
         self.anchors = {}
+        self.track_ids = {}
+        self.next_track_id = 0
+
+    def add_dense(self, frame_id, image, points, confidence):
+        """Cache one RGB image, depth map, and confidence map for each frame."""
+        frame_id = int(frame_id)
+        if frame_id not in self.dense:
+            self.dense[frame_id] = tuple(
+                value.detach().cpu()
+                for value in (image, points[..., 2], confidence)
+            )
 
     def add_keyframe(self, frame_id, image, points, confidence, keys, queries, anchors, weights):
-        """Store immutable CPU copies of dense geometry and sparse anchor metadata."""
-        self.keyframes.add(int(frame_id))
-        if frame_id not in self.dense:
-            self.dense[int(frame_id)] = (
-                image.detach().cpu(), points.detach().cpu(), confidence.detach().cpu()
-            )
+        """Store one keyframe and assign every image query a stable track ID."""
+        frame_id = int(frame_id)
+        self.keyframes.add(frame_id)
+        self.add_dense(frame_id, image, points, confidence)
         if frame_id not in self.anchors:
-            self.anchors[int(frame_id)] = tuple(
+            self.anchors[frame_id] = tuple(
                 value.detach().cpu() for value in (keys, queries, anchors, weights)
             )
+            count = int(keys.numel())
+            self.track_ids[frame_id] = torch.arange(
+                self.next_track_id,
+                self.next_track_id + count,
+                dtype=torch.long,
+            )
+            self.next_track_id += count
+        else:
+            cached_keys = self.anchors[frame_id][0]
+            if not torch.equal(cached_keys, keys.detach().cpu()):
+                raise RuntimeError(
+                    f"keyframe {frame_id} image query identity changed"
+                )
+            if frame_id not in self.track_ids:
+                raise RuntimeError(
+                    f"keyframe {frame_id} has no stable track ID registry"
+                )
+        return self.track_ids[frame_id].to(keys.device)
 
 
 class WindowTracker:
@@ -44,41 +89,17 @@ class WindowTracker:
         self.frames = frames
         self.dataset = dataset
         self.device = torch.device(config["device"])
+        self.pi3_mask_confidence_threshold = float(
+            config.get("pi3_mask_confidence_threshold", PI3_MASK_CONFIDENCE)
+        )
+        self.keyframe_projection_threshold = float(
+            config.get("keyframe_projection_threshold", 0.7)
+        )
+        self.keyframe_confidence_threshold = float(
+            config.get("keyframe_confidence_threshold", PI3_VALID_CONFIDENCE)
+        )
+        self.keyframe_max_interval = int(config.get("keyframe_max_interval", 5))
         self.processed_pairs = set()
-
-    def _keyframes_projection_coverage(self, frame_ids, points, poses, K, valid_mask):
-        """Select a new keyframe when existing views cover too little valid geometry."""
-        height, width = valid_mask.shape[-2:]
-        selected = [i for i, frame_id in enumerate(frame_ids) if frame_id in self.frames.keyframes]
-        if not selected:
-            selected = [0]
-        for target in range(len(frame_ids)):
-            if target in selected:
-                continue
-            target_valid = valid_mask[target]
-            threshold = KEYFRAME_PROJECTION_RATIO * target_valid.sum()
-            relative = torch.linalg.inv(poses[selected]) @ poses[target]
-            X = points[target].reshape(-1, 3)
-            Xr = torch.einsum("kij,mj->kmi", relative[:, :3, :3], X) + relative[:, None, :3, 3]
-            projected = torch.einsum("kij,kmj->kmi", K[selected], Xr)
-            uv = projected[..., :2] / projected[..., 2:3].clamp_min(1.0e-8)
-            pixels = uv.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).round().long()
-            pixels[..., 0].clamp_(0, width - 1)
-            pixels[..., 1].clamp_(0, height - 1)
-            reference_ids = torch.arange(len(selected), device=self.device)[:, None]
-            projected_valid = valid_mask[selected][
-                reference_ids, pixels[..., 1], pixels[..., 0]
-            ]
-            valid = (
-                target_valid.reshape(1, -1)
-                & projected_valid
-                & (Xr[..., 2] > 0)
-                & (uv[..., 0] >= 0) & (uv[..., 0] <= width - 1)
-                & (uv[..., 1] >= 0) & (uv[..., 1] <= height - 1)
-            )
-            if valid.sum(dim=-1).max() < threshold:
-                selected.append(target)
-        return sorted(selected)
 
     def _valid_tracks(self, output, valid_mask):
         """Apply the graph observation checks to tracks from one reference frame."""
@@ -109,7 +130,7 @@ class WindowTracker:
                 valid_mask[reference],
             )
             if not keys.numel():
-                raise RuntimeError(f"keyframe {frame_id} has no valid SIFT queries")
+                raise RuntimeError(f"keyframe {frame_id} has no valid image queries")
             output = self.tracks_model.track(reference, queries)
             cache[reference] = {
                 "keys": keys,
@@ -121,41 +142,17 @@ class WindowTracker:
             }
         return cache[reference]
 
-    def _keyframes_mast3r_fusion(
-        self, frame_ids, images, points, confidence, valid_mask, track_cache
-    ):
-        """Select keyframes from match coverage against the latest keyframe."""
-        existing = [
-            local for local, frame_id in enumerate(frame_ids)
-            if frame_id in self.frames.keyframes
-        ]
-        reference = existing[-1] if existing else 0
-        selected = [reference]
-        for target in range(reference + 1, len(frame_ids)):
-            tracked = self._reference_tracks(
-                frame_ids, images, points, confidence, valid_mask, reference, track_cache
-            )
-            required = KEYFRAME_MATCH_COVERAGE_RATIO * tracked["keys"].numel()
-            if tracked["valid"][target].sum() < required:
-                selected.append(target)
-                reference = target
-        return selected
-
     def _queries(self, frame_id, image, points, confidence, valid_mask):
-        """Return stable feature IDs, pixels, 3D anchors, and confidence for a keyframe."""
+        """Return every selected image query with a stable per-keyframe identity."""
         if frame_id in self.frames.anchors:
             return tuple(value.to(self.device) for value in self.frames.anchors[frame_id])
         queries = self.features.extract(image, valid_mask)
         anchors = sample_map(points, queries)[0]
-        weights = sample_map(confidence[..., None], queries)[0, :, 0]
-        valid = (
-            (weights > PI3_VALID_CONFIDENCE) & torch.isfinite(anchors).all(-1)
-            & (anchors[:, 2] > 0)
-        )
-        # The SIFT row index is retained as the feature identity. Reusing it in
-        # later windows makes (reference frame, feature ID) a stable graph key.
-        keys = torch.arange(queries.shape[0], device=self.device, dtype=torch.long)[valid]
-        return keys, queries[valid], anchors[valid], weights[valid]
+        weights = torch.ones(queries.shape[0], device=self.device, dtype=queries.dtype)
+        # Query identity is fixed once the selected frontend rows are created.
+        # Sliding and loop packets then reuse these row identities unchanged.
+        keys = torch.arange(queries.shape[0], device=self.device, dtype=torch.long)
+        return keys, queries, anchors, weights
 
     def _factors(
         self,
@@ -163,49 +160,34 @@ class WindowTracker:
         frame_ids,
         reference,
         keys,
+        track_ids,
         queries,
         anchors,
         anchor_weights,
         track_valid,
     ):
-        """Convert one tracks result into observations and weighted pose-graph edges."""
+        """Convert one raw reference track result into image observations."""
         tracks, scores = output["tracks"], output["confidence"]
         valid = track_valid.clone()
         ref_id = int(frame_ids[reference])
-        fresh = torch.tensor(
-            [
-                local == reference
-                or (ref_id, int(frame_id)) not in self.processed_pairs
-                for local, frame_id in enumerate(frame_ids)
-            ],
-            device=self.device, dtype=torch.bool,
-        )
-        valid &= fresh[:, None]
-        # Anchors were validated when first created and remain the identity of
-        # a persistent point even if Pi3 confidence changes in a later window.
         valid[reference] = True
-        # A point may enter the persistent graph from a partial window, while
-        # pose-graph edges count only tracks observed in at least three views.
-        complete = valid.sum(0) >= 3
         target_valid = valid.clone()
         target_valid[reference] = False
         keep = target_valid.any(0)
         if not keep.any():
             return None
-        keys, queries = keys[keep], queries[keep]
+        keys, track_ids, queries = keys[keep], track_ids[keep], queries[keep]
         anchors, anchor_weights = anchors[keep], anchor_weights[keep]
         tracks, scores = tracks[:, keep], scores[:, keep]
-        valid, complete = valid[:, keep], complete[keep]
+        valid = valid[:, keep]
         point_index = torch.arange(keys.numel(), device=self.device)
         obs_frames = [torch.full_like(point_index, ref_id)]
         obs_points = [point_index]
         obs_uv = [queries]
         obs_weights = [anchor_weights]
-        edge_source, edge_target, edge_weight = [], [], []
         for target, target_id in enumerate(frame_ids):
             if target == reference:
                 continue
-            self.processed_pairs.add((ref_id, int(target_id)))
             mask = valid[target]
             if not mask.any():
                 continue
@@ -219,107 +201,287 @@ class WindowTracker:
             )
             obs_points.append(point_index[mask])
             obs_uv.append(tracks[target, mask])
-            obs_weights.append(anchor_weights[mask] * scores[target, mask])
-            graph_mask = mask & complete
-            if graph_mask.any():
-                edge_source.append(ref_id)
-                edge_target.append(int(target_id))
-                edge_weight.append(int(graph_mask.sum()))
+            obs_weights.append(scores[target, mask])
         return {
-            "keys": keys, "anchors": anchors,
+            "keys": keys, "track_ids": track_ids, "anchors": anchors,
             "obs_frames": torch.cat(obs_frames), "obs_points": torch.cat(obs_points),
             "obs_uv": torch.cat(obs_uv), "obs_weights": torch.cat(obs_weights),
-            "edge_source": edge_source, "edge_target": edge_target, "edge_weight": edge_weight,
         }
 
-    @torch.no_grad()
-    def track(self, frame_ids):
-        """Infer one window and return a factor packet without optimizing state."""
+    def _keep_fresh_observations(self, packet):
+        """Drop repeated reference-target measurements after geometry verification."""
+        fresh_parts = []
+        for part in packet["parts"]:
+            reference = int(part["reference"])
+            obs_frames = part["obs_frames"]
+            fresh = torch.tensor(
+                [
+                    int(frame_id) == reference
+                    or (reference, int(frame_id)) not in self.processed_pairs
+                    for frame_id in obs_frames.tolist()
+                ],
+                device=obs_frames.device,
+                dtype=torch.bool,
+            )
+            point_count = int(part["track_ids"].numel())
+            target = fresh & (obs_frames != reference)
+            support = torch.bincount(
+                part["obs_points"][target], minlength=point_count
+            )
+            point_keep = support > 0
+            if not bool(point_keep.any()):
+                continue
+            observation_keep = fresh & point_keep[part["obs_points"]]
+            point_map = torch.full(
+                (point_count,), -1, device=obs_frames.device, dtype=torch.long
+            )
+            point_map[point_keep] = torch.arange(
+                int(point_keep.sum()), device=obs_frames.device
+            )
+            output = dict(part)
+            for name in ("keys", "track_ids", "anchors", "queries", "anchor_weights"):
+                value = output.get(name)
+                if torch.is_tensor(value) and value.shape[:1] == point_keep.shape:
+                    output[name] = value[point_keep.to(value.device)]
+            for name in ("obs_frames", "obs_uv", "obs_weights"):
+                output[name] = output[name][observation_keep.to(output[name].device)]
+            kept_points = part["obs_points"][observation_keep]
+            output["obs_points"] = point_map[kept_points]
+            fresh_parts.append(output)
+        packet["parts"] = fresh_parts
+        return packet
+
+    def _reference_indices(self, frame_ids, references):
+        """Resolve explicit loop references into local window indices."""
+        if references is None:
+            return None
+        local = {frame_id: index for index, frame_id in enumerate(frame_ids)}
+        missing = [int(frame_id) for frame_id in references if int(frame_id) not in local]
+        if missing:
+            raise ValueError(f"reference frames are absent from window: {missing}")
+        unregistered = [
+            int(frame_id)
+            for frame_id in references
+            if int(frame_id) not in self.frames.track_ids
+        ]
+        if unregistered:
+            raise RuntimeError(
+                "loop references have no stable track ID registry: "
+                f"{unregistered}"
+            )
+        return list(dict.fromkeys(local[int(frame_id)] for frame_id in references))
+
+    def _infer_window(self, frame_ids):
+        """Decode Pi3 geometry and prepare the selected tracks frontend once."""
         images = self.dataset.read(frame_ids).to(self.device)
         model_images = images
         if self.frames.valid_mask is not None:
             model_images = images * self.frames.valid_mask.to(self.device)[None, None]
-        # Geometry is decoded once. The selected tracks frontend then consumes
-        # either the shared Glob3R state or its own VGGSfM feature pyramid.
-        geometry, tracks_state = self.geometry_model.infer_window(model_images.unsqueeze(0))
-        self.tracks_model.prepare_window(model_images.unsqueeze(0), tracks_state)
+        geometry, tracks_state = self.geometry_model.infer_window(
+            model_images.unsqueeze(0)
+        )
         points = geometry["local_points"].squeeze(0)
         confidence = geometry["conf"].squeeze(0).sigmoid().squeeze(-1)
-        valid_mask = (
+        image_valid_mask = torch.ones_like(confidence, dtype=torch.bool)
+        if self.frames.valid_mask is not None:
+            image_valid_mask &= self.frames.valid_mask.to(self.device)[None]
+        pi3_valid = (
             torch.isfinite(points).all(-1)
             & torch.isfinite(confidence)
             & (points[..., 2] > 0)
             & (confidence > PI3_VALID_CONFIDENCE)
+            & image_valid_mask
         )
-        if self.frames.valid_mask is not None:
-            valid_mask &= self.frames.valid_mask.to(self.device)[None]
-        valid_counts = valid_mask.flatten(1).sum(-1)
+        valid_counts = pi3_valid.flatten(1).sum(-1)
         if (valid_counts == 0).any():
             local = int(torch.nonzero(valid_counts == 0, as_tuple=False)[0])
             raise RuntimeError(f"frame {frame_ids[local]} has no valid Pi3 geometry")
-        confidence = torch.where(valid_mask, confidence, 0)
+
+        track_valid_mask = (
+            torch.isfinite(confidence)
+            & (confidence > self.pi3_mask_confidence_threshold)
+            & image_valid_mask
+        )
+        track_images = images * track_valid_mask[:, None]
+        dense_confidence = torch.where(track_valid_mask, confidence, 0)
+        if not torch.equal(track_valid_mask, image_valid_mask):
+            tracks_state = None
+        self.tracks_model.prepare_window(track_images.unsqueeze(0), tracks_state)
+
         poses = geometry["camera_poses"].squeeze(0)
         poses = torch.linalg.inv(poses[0])[None] @ poses
         K = self.frames.K.to(self.device).expand(len(frame_ids), -1, -1).clone()
-        track_cache = {}
-        # Switch the keyframe policy by commenting one call and enabling the other.
-        # keyframes = self._keyframes_projection_coverage(frame_ids, points, poses, K, valid_mask)
-        keyframes = self._keyframes_mast3r_fusion(
-            frame_ids, images, points, confidence, valid_mask, track_cache
-        )
-        parts = []
-        for reference in keyframes:
-            frame_id = int(frame_ids[reference])
-            tracked = self._reference_tracks(
-                frame_ids, images, points, confidence, valid_mask, reference, track_cache
+        for local, frame_id in enumerate(frame_ids):
+            self.frames.add_dense(
+                frame_id, images[local], points[local], dense_confidence[local]
             )
-            self.frames.add_keyframe(
-                frame_id, images[reference], points[reference], confidence[reference],
-                tracked["keys"], tracked["queries"], tracked["anchors"], tracked["weights"],
+        return WindowState(
+            frame_ids=frame_ids,
+            images=images,
+            track_images=track_images,
+            points=points,
+            confidence=confidence,
+            dense_confidence=dense_confidence,
+            track_valid_mask=track_valid_mask,
+            poses=poses,
+            K=K,
+        )
+
+    def _keyframe_indices(self, window, explicit_keyframes):
+        """Select sliding keyframes or reuse the explicit loop references."""
+        if explicit_keyframes is not None:
+            return explicit_keyframes
+        return select_keyframes_eq4_window(
+            window.frame_ids,
+            window.points,
+            window.confidence,
+            window.poses,
+            window.K,
+            window.track_valid_mask,
+            existing_keyframes=self.frames.keyframes,
+            projection_threshold=self.keyframe_projection_threshold,
+            confidence_threshold=self.keyframe_confidence_threshold,
+            maximum_interval=self.keyframe_max_interval,
+        ).tolist()
+
+    def _build_packet(self, window, keyframes, is_loop):
+        """Track selected references and assemble an unverified factor packet."""
+        track_cache = {}
+        parts = []
+        visualization = []
+        for reference in keyframes:
+            frame_id = window.frame_ids[reference]
+            tracked = self._reference_tracks(
+                window.frame_ids,
+                window.track_images,
+                window.points,
+                window.confidence,
+                window.track_valid_mask,
+                reference,
+                track_cache,
+            )
+            if not is_loop:
+                visualization.append({
+                    "frontend": getattr(self.tracks_model, "name", "unknown"),
+                    "reference": frame_id,
+                    "frame_ids": torch.tensor(
+                        window.frame_ids, device=self.device, dtype=torch.long
+                    ),
+                    "query_points": tracked["queries"],
+                    "raw_tracks": tracked["output"]["tracks"],
+                    "frontend_valid": tracked["valid"],
+                    "visualization_confidence": tracked["output"].get(
+                        "visualization_confidence",
+                        tracked["output"]["confidence"],
+                    ),
+                    "visualization_confidence_label": tracked["output"].get(
+                        "visualization_confidence_label", "confidence"
+                    ),
+                })
+            track_ids = self.frames.add_keyframe(
+                frame_id,
+                window.images[reference],
+                window.points[reference],
+                window.dense_confidence[reference],
+                tracked["keys"],
+                tracked["queries"],
+                tracked["anchors"],
+                tracked["weights"],
             )
             already_processed = all(
-                (frame_id, int(target)) in self.processed_pairs
-                for target in frame_ids
+                (frame_id, target) in self.processed_pairs
+                for target in window.frame_ids
                 if target != frame_id
             )
             if already_processed:
                 continue
             part = self._factors(
-                tracked["output"], frame_ids, reference,
-                tracked["keys"], tracked["queries"], tracked["anchors"], tracked["weights"],
+                tracked["output"],
+                window.frame_ids,
+                reference,
+                tracked["keys"],
+                track_ids,
+                tracked["queries"],
+                tracked["anchors"],
+                tracked["weights"],
                 tracked["valid"],
             )
             if part is not None:
                 part["reference"] = frame_id
                 parts.append(part)
-        # Packets contain measurements only. FactorGraph owns persistent state
-        # and the caller decides when to create a local or global graph view.
-        packet = {
-            "frame_ids": torch.tensor(frame_ids, device=self.device),
+        return {
+            "kind": "loop" if is_loop else "sliding",
+            "frontend": getattr(self.tracks_model, "name", "unknown"),
+            "frame_ids": torch.tensor(window.frame_ids, device=self.device),
             "keyframes": torch.tensor(
-                [int(frame_ids[reference]) for reference in keyframes],
+                [window.frame_ids[reference] for reference in keyframes],
                 device=self.device,
                 dtype=torch.long,
             ),
-            "poses": torch.linalg.inv(poses), "K": K, "parts": parts, "edges": [],
+            "poses": torch.linalg.inv(window.poses),
+            "K": window.K,
+            "parts": parts,
+            "edges": [],
+            "visualization": visualization,
         }
-        local = {int(frame_id): i for i, frame_id in enumerate(frame_ids)}
-        for part in parts:
-            edges = zip(
-                part["edge_source"], part["edge_target"], part["edge_weight"]
+
+    def _verify_and_commit(self, packet, keyframes, minimum_edge_views, is_loop):
+        """Verify candidate geometry and commit only accepted pair identities."""
+        if not packet["parts"]:
+            if is_loop:
+                return packet
+            raise RuntimeError("tracks frontend produced no candidate factors")
+        pairs = None
+        if is_loop:
+            pairs = [
+                (reference, target)
+                for reference in keyframes
+                for target in range(len(packet["frame_ids"]))
+                if target != reference
+            ]
+        try:
+            packet = verify_packet(
+                packet,
+                minimum_track_observations=minimum_edge_views,
+                pairs=pairs,
+                initialize=not is_loop,
             )
-            for source, target, weight in edges:
-                relative = packet["poses"][local[target]] @ torch.linalg.inv(
-                    packet["poses"][local[source]]
-                )
-                packet["edges"].append((source, target, relative, weight))
+        except RuntimeError as error:
+            if not is_loop:
+                raise
+            packet["parts"] = []
+            packet["edges"] = []
+            packet["geometry_error"] = str(error)
+        else:
+            packet = self._keep_fresh_observations(packet)
+        for part in packet["parts"]:
+            reference_id = int(part["reference"])
+            self.processed_pairs.update(
+                (reference_id, int(target_id))
+                for target_id in part["obs_frames"].unique().tolist()
+                if int(target_id) != reference_id
+            )
         return packet
+
+    @torch.no_grad()
+    def track(self, frame_ids, references=None, minimum_edge_views=3):
+        """Infer one window and return a factor packet without optimizing state."""
+        if int(minimum_edge_views) < 2:
+            raise ValueError("minimum_edge_views must be at least two")
+        frame_ids = tuple(map(int, frame_ids))
+        explicit_keyframes = self._reference_indices(frame_ids, references)
+        window = self._infer_window(frame_ids)
+        keyframes = self._keyframe_indices(window, explicit_keyframes)
+        packet = self._build_packet(window, keyframes, references is not None)
+        return self._verify_and_commit(
+            packet, keyframes, int(minimum_edge_views), references is not None
+        )
 
 
 __all__ = [
     "FrameStore",
-    "KEYFRAME_MATCH_COVERAGE_RATIO",
-    "KEYFRAME_PROJECTION_RATIO",
+    "PI3_MASK_CONFIDENCE",
     "PI3_VALID_CONFIDENCE",
+    "WindowState",
     "WindowTracker",
 ]

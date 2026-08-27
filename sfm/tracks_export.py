@@ -143,6 +143,9 @@ def save_ba_tracks(output_dir, view, frames, pixel_transforms=None):
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    for stale in output_dir.glob("p*.ply"):
+        if stale.stem[1:].isdigit():
+            stale.unlink()
     export_ids = np.arange(1, point_count + 1, dtype=np.uint32)
 
     point_records = np.empty(point_count, dtype=_POINT_DTYPE)

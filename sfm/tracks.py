@@ -21,7 +21,9 @@ def sample_map(values, points):
 
 
 class Glob3RTracks:
-    """Sample Glob3R dense correspondence maps at shared SIFT query points."""
+    """Sample Glob3R dense correspondence maps at shared image query points."""
+
+    name = "glob3r"
 
     def __init__(self, model):
         self.model = model
@@ -32,7 +34,7 @@ class Glob3RTracks:
     def prepare_window(self, images, state):
         """Cache images and encoded features produced by the geometry frontend."""
         if state is None:
-            raise ValueError("Glob3R tracks require geometry encoder features")
+            state = self.model.encode_matching_state(images)
         self.images = images
         self.patch_tokens, self.encoder = state
 
@@ -78,23 +80,46 @@ class Glob3RTracks:
         tracks[targets] = sample_map(warps.squeeze(0), query_points)
         scores[targets] = sample_map(confidence.squeeze(0), query_points).squeeze(-1)
         scores[targets] *= scores[targets] >= 0.6
-        return {"tracks": tracks, "confidence": scores}
+        confidence_map = confidence.squeeze(0)
+        if confidence_map.ndim == 4 and confidence_map.shape[1] == 1:
+            confidence_map = confidence_map[:, 0]
+        if confidence_map.ndim != 3:
+            raise RuntimeError(
+                "Glob3R confidence heatmap must have shape [targets,H,W]"
+            )
+        confidence_maps = confidence_map.new_zeros(
+            self.images.shape[1], height, width
+        )
+        confidence_maps[reference] = 1
+        confidence_maps[targets] = confidence_map
+        return {
+            "tracks": tracks,
+            "confidence": scores,
+            "visualization_confidence": confidence_maps,
+            "visualization_confidence_label": "glob3r confidence",
+        }
 
 
 class VGGSfMTracks:
     """Adapt the official VGGSfM tracker to the shared tracks output protocol."""
 
+    name = "vgg"
+
     def __init__(
         self,
         tracker,
+        image_size,
         tracker_size=1024,
-        confidence=0.2,
+        visibility_threshold=0.05,
+        score_threshold=0.5,
         fine_tracking=True,
         mixed_precision="fp16",
     ):
         self.tracker = tracker.eval()
+        self.image_size = tuple(map(int, image_size))
         self.tracker_size = int(tracker_size)
-        self.confidence = float(confidence)
+        self.visibility_threshold = float(visibility_threshold)
+        self.score_threshold = float(score_threshold)
         self.fine_tracking = bool(fine_tracking)
         self.autocast_dtype = {
             "none": None,
@@ -112,25 +137,49 @@ class VGGSfMTracks:
 
     @torch.no_grad()
     def prepare_window(self, images, _state):
-        """Resize one window and compute the feature pyramid once for all references."""
-        batch, frames, channels, _, _ = images.shape
-        self.source_size = images.shape[-2:]
+        """Apply VGGSfM's square padding and resize before feature extraction."""
+        if tuple(images.shape[-2:]) != self.image_size:
+            raise ValueError(
+                f"VGGSfM expected image_size={self.image_size}, "
+                f"received={tuple(images.shape[-2:])}"
+            )
+        batch, frames, channels, height, width = images.shape
+        square_size = max(height, width)
+        vertical = square_size - height
+        horizontal = square_size - width
+        # Official DemoLoader centers the image in a square crop. For an odd
+        # difference its negative crop origin puts the extra pixel first.
+        pad_top = (vertical + 1) // 2
+        pad_bottom = vertical - pad_top
+        pad_left = (horizontal + 1) // 2
+        pad_right = horizontal - pad_left
+        padded = F.pad(
+            images, (pad_left, pad_right, pad_top, pad_bottom), value=0.0
+        )
         self.images = F.interpolate(
-            images.reshape(batch * frames, channels, *images.shape[-2:]),
-            (self.tracker_size, self.tracker_size), mode="bilinear", align_corners=True,
-        ).reshape(batch, frames, channels, self.tracker_size, self.tracker_size)
+            padded.reshape(batch * frames, channels, square_size, square_size),
+            size=(self.tracker_size, self.tracker_size),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        ).reshape(
+            batch,
+            frames,
+            channels,
+            self.tracker_size,
+            self.tracker_size,
+        )
+        self.coordinate_scale = self.tracker_size / square_size
+        self.coordinate_shift = images.new_tensor(
+            (pad_left, pad_top)
+        ) * self.coordinate_scale
         with self._autocast(images.device):
             self.fmaps = self.tracker.process_images_to_fmaps(self.images)
 
     @torch.no_grad()
     def track(self, reference, query_points):
-        """Track source-resolution SIFT points from one reference through the window."""
+        """Track shared image queries in the configured image coordinates."""
         frame_count = self.images.shape[1]
-        height, width = self.images.shape[-2:]
-        source_height, source_width = self.source_size
-        scale = query_points.new_tensor(
-            ((width - 1) / max(source_width - 1, 1), (height - 1) / max(source_height - 1, 1))
-        )
         # TrackerPredictor treats frame zero as the query frame, so preserve an
         # explicit permutation and undo it before returning graph observations.
         order = torch.cat((
@@ -140,8 +189,11 @@ class VGGSfMTracks:
             ],
         ))
         with self._autocast(query_points.device):
+            tracker_queries = (
+                query_points * self.coordinate_scale + self.coordinate_shift
+            )
             fine, coarse, visibility, score = self.tracker(
-                self.images[:, order], (query_points * scale)[None],
+                self.images[:, order], tracker_queries[None],
                 fmaps=self.fmaps[:, order], fine_tracking=self.fine_tracking,
             )
         predicted = fine if self.fine_tracking else coarse
@@ -151,14 +203,25 @@ class VGGSfMTracks:
         visible[:, order] = visibility
         if score is None:
             raise RuntimeError("VGGSfM tracker did not return track scores")
-        confidence = torch.empty_like(score)
-        confidence[:, order] = score
-        confidence *= visible
-        tracks[:, reference] = query_points[None] * scale
+        reordered_score = torch.empty_like(score)
+        reordered_score[:, order] = score
+        valid = (
+            (visible > self.visibility_threshold)
+            & (reordered_score > self.score_threshold)
+        )
+        confidence = torch.where(
+            valid, visible * reordered_score, torch.zeros_like(reordered_score)
+        )
+        tracks[:, reference] = tracker_queries[None]
+        tracks = (tracks - self.coordinate_shift) / self.coordinate_scale
+        visible[:, reference] = 1
         confidence[:, reference] = 1
-        tracks /= scale
-        confidence = torch.where(confidence >= self.confidence, confidence, 0)
-        return {"tracks": tracks[0].float(), "confidence": confidence[0].float()}
+        return {
+            "tracks": tracks[0].float(),
+            "confidence": confidence[0].float(),
+            "visualization_confidence": visible[0].float(),
+            "visualization_confidence_label": "vgg visibility",
+        }
 
 
 def _configure_vggsfm_source(root):
@@ -174,7 +237,7 @@ def _configure_vggsfm_source(root):
     if root_string not in sys.path:
         sys.path.insert(0, root_string)
 
-
+# TODO: vggsfm_v2_0_0.bin->vggsfm_v2_tracker.pt
 def load_vggsfm_tracker(root, checkpoint, device):
     """Build TrackerPredictor from a configured source tree and local checkpoint."""
     root = Path(root).resolve()

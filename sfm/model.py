@@ -52,6 +52,23 @@ class Glob3RSfM(Glob3R):
             encoder.append(x.reshape(batch, frames, x.shape[1], x.shape[2]))
         return tokens, positions, encoder
 
+    def _matching_state(self, tokens, encoder, batch, frames):
+        backbone = self.backbone
+        patch_tokens = tokens.reshape(
+            batch, frames, tokens.shape[1], tokens.shape[2]
+        )
+        patch_tokens = patch_tokens[:, :, int(backbone.patch_start_idx):]
+        return patch_tokens, encoder
+
+    @torch.no_grad()
+    def encode_matching_state(self, images):
+        """Encode masked RGB when it differs from the geometry-stage input."""
+        if images.ndim != 5 or images.shape[0] != 1:
+            raise ValueError("images must have shape [1,N,3,H,W]")
+        batch, frames = images.shape[:2]
+        tokens, _, encoder = self._features(images)
+        return self._matching_state(tokens, encoder, batch, frames)
+
     @torch.no_grad()
     def infer_window(self, images):
         """Infer geometry and reusable matching state for ``[1,N,3,H,W]`` images."""
@@ -61,9 +78,7 @@ class Glob3RSfM(Glob3R):
         tokens, positions, encoder = self._features(images)
         backbone = self.backbone
         geometry = _decode_geometry(backbone, tokens, positions, batch, frames, height, width)
-        patch_tokens = tokens.reshape(batch, frames, tokens.shape[1], tokens.shape[2])
-        patch_tokens = patch_tokens[:, :, int(backbone.patch_start_idx):]
-        return geometry, (patch_tokens, encoder)
+        return geometry, self._matching_state(tokens, encoder, batch, frames)
 
     @torch.no_grad()
     def match_pair(self, patch_tokens, encoder_features, images, reference_index):
@@ -154,7 +169,14 @@ def load_models(config):
     tracker = load_vggsfm_tracker(
         config["vggsfm_root"], config["vggsfm_checkpoint"], device
     )
-    return geometry, VGGSfMTracks(tracker)
+    return geometry, VGGSfMTracks(
+        tracker,
+        config["image_size"],
+        visibility_threshold=float(
+            config.get("vgg_track_visibility_threshold", 0.05)
+        ),
+        score_threshold=float(config.get("vgg_track_score_threshold", 0.5)),
+    )
 
 
 __all__ = ["Glob3RSfM", "Pi3Geometry", "load_models"]

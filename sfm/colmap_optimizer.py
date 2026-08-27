@@ -5,7 +5,15 @@ import importlib
 import numpy as np
 import torch
 
-from .optimizer import _project, _robust_loss
+from .optimizer import (
+    MAX_REPROJECTION_ERROR_PX,
+    MIN_TRACK_OBSERVATIONS,
+    _bearing_adjust,
+    _fixed_camera_mask,
+    _project,
+    _robust_loss,
+    filter_reprojection_observations,
+)
 
 
 def _load_pycolmap():
@@ -41,13 +49,20 @@ def _build_reconstruction(view, pycolmap):
 
     reconstruction = pycolmap.Reconstruction()
     mean_K = intrinsics.mean(axis=0)
+    mean_distortion = view["distortion"].detach().cpu().double().numpy().mean(axis=0)
     camera_id = 1
     camera = pycolmap.Camera(
         model="OPENCV",
         width=max(1, int(round(2.0 * mean_K[0, 2]))),
         height=max(1, int(round(2.0 * mean_K[1, 2]))),
         params=np.array(
-            [mean_K[0, 0], mean_K[1, 1], mean_K[0, 2], mean_K[1, 2], 0, 0, 0, 0],
+            [
+                mean_K[0, 0],
+                mean_K[1, 1],
+                mean_K[0, 2],
+                mean_K[1, 2],
+                *mean_distortion.tolist(),
+            ],
             dtype=np.float64,
         ),
         camera_id=camera_id,
@@ -117,7 +132,10 @@ def _bundle_adjustment_options(pycolmap, iterations):
     options.ceres.loss_function_scale = 2.0
     options.ceres.loss_function_type = pycolmap.LossFunctionType.CAUCHY
     options.refine_principal_point = True
-    options.refine_extra_params = True
+    # The rest of this SfM pipeline uses a pinhole camera model. Keeping the
+    # OPENCV distortion terms fixed at zero makes COLMAP and native BA consume
+    # the same projection model and keeps dense unprojection consistent.
+    options.refine_extra_params = False
     options.refine_rig_from_world = True
     options.refine_sensor_from_rig = False
     options.refine_focal_length = True
@@ -137,6 +155,17 @@ def _bundle_adjustment_config(pycolmap, reconstruction, image_ids, fixed_ids):
         )
     config.fix_gauge(pycolmap.BundleAdjustmentGauge.TWO_CAMS_FROM_WORLD)
     return config
+
+
+def _active_fixed_ids(view, fixed_ids):
+    """Keep requested gauge cameras that have measurements in this BA round."""
+    _fixed_camera_mask(view["poses"], fixed_ids)
+    active = torch.unique(view["ii"]).tolist()
+    if not active:
+        raise RuntimeError("COLMAP BA requires at least one observed camera")
+    active_set = {int(camera) for camera in active}
+    resolved = [int(camera) for camera in fixed_ids if int(camera) in active_set]
+    return resolved if resolved else [int(active[0])]
 
 
 def _extract_result(view, reconstruction, camera_id, point_ids, image_ids):
@@ -193,7 +222,7 @@ def optimize_view_colmap(view, fixed_ids, iterations):
     _validate_reconstruction(reconstruction)
     options = _bundle_adjustment_options(pycolmap, iterations)
     config = _bundle_adjustment_config(
-        pycolmap, reconstruction, image_ids, fixed_ids
+        pycolmap, reconstruction, image_ids, _active_fixed_ids(view, fixed_ids)
     )
     adjuster = pycolmap.create_default_bundle_adjuster(
         options, config, reconstruction
@@ -205,4 +234,105 @@ def optimize_view_colmap(view, fixed_ids, iterations):
     return _extract_result(view, reconstruction, camera_id, point_ids, image_ids)
 
 
-__all__ = ["optimize_view_colmap"]
+@torch.no_grad()
+def optimize_view_colmap_two_rounds(
+    view,
+    fixed_ids,
+    bearing_iterations=15,
+    first_iterations=20,
+    second_iterations=10,
+    max_error_px=MAX_REPROJECTION_ERROR_PX,
+    min_observations=MIN_TRACK_OBSERVATIONS,
+):
+    """Run the same Eq. (5), filtering, and two-round policy as native BA."""
+    poses = view["poses"].clone()
+    points = view["points"].clone()
+    fixed = _fixed_camera_mask(poses, fixed_ids)
+    poses, points = _bearing_adjust(
+        poses, points, view, fixed, bearing_iterations
+    )
+    first_view = dict(view, poses=poses, points=points)
+    first_result = optimize_view_colmap(
+        first_view, fixed_ids, first_iterations
+    )
+    first_evaluation = dict(
+        view,
+        K=first_result["K"],
+        distortion=first_result["distortion"],
+    )
+    first = filter_reprojection_observations(
+        first_evaluation,
+        first_result["poses"],
+        first_result["points"],
+        max_error_px=max_error_px,
+        min_observations=min_observations,
+    )
+    first_ids = torch.nonzero(
+        first["observation_inliers"], as_tuple=False
+    ).squeeze(-1)
+    selected = {
+        name: first_evaluation[name][first_ids]
+        for name in ("ii", "jj", "uv", "weight")
+    }
+    second_view = dict(
+        first_evaluation,
+        poses=first_result["poses"],
+        points=first_result["points"],
+        **selected,
+    )
+    if "observation_ids" in view:
+        second_view["observation_ids"] = view["observation_ids"][first_ids]
+    second_result = optimize_view_colmap(
+        second_view, fixed_ids, second_iterations
+    )
+    final_evaluation = dict(
+        view,
+        K=second_result["K"],
+        distortion=second_result["distortion"],
+    )
+    final = filter_reprojection_observations(
+        final_evaluation,
+        second_result["poses"],
+        second_result["points"],
+        max_error_px=max_error_px,
+        min_observations=min_observations,
+        observation_ids=first_ids,
+    )
+    final_ids = torch.nonzero(
+        final["observation_inliers"], as_tuple=False
+    ).squeeze(-1)
+    projection, _ = _project(
+        second_result["poses"],
+        second_result["points"],
+        second_result["K"],
+        second_result["distortion"],
+        view["ii"][final_ids],
+        view["jj"][final_ids],
+    )
+    loss = _robust_loss(
+        view["uv"][final_ids] - projection,
+        view["weight"][final_ids],
+        2.0,
+    )
+    valid_observations = final["observation_inliers"].sum()
+    return {
+        "poses": second_result["poses"],
+        "points": second_result["points"],
+        "K": second_result["K"],
+        "distortion": second_result["distortion"],
+        "loss": loss,
+        "loss_per_pixel": loss / valid_observations.to(loss.dtype),
+        "valid_observations": valid_observations,
+        "input_observations": torch.as_tensor(
+            view["ii"].numel(), device=poses.device, dtype=torch.long
+        ),
+        "first_inlier_observations": first["observation_inliers"].sum(),
+        "observation_inliers": final["observation_inliers"],
+        "first_point_inliers": first["point_inliers"],
+        "point_inliers": final["point_inliers"],
+        "reprojection_error": final["reprojection_error"],
+        "ba_backend": "colmap",
+    }
+
+
+__all__ = ["optimize_view_colmap", "optimize_view_colmap_two_rounds"]
