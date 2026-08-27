@@ -52,19 +52,20 @@ CALIBRATION = None
 MASK = None
 OUTPUT = "outputs/vggsfm_tracks_sfm/result.pt"
 MATCH_VIS_DIR = "outputs/vggsfm_tracks_sfm/matching"
-HEIGHT = 336
-WIDTH = 448
+HEIGHT = 378
+WIDTH = 672
 DEVICE = "cuda:0"
 RANDOM_SEED = 0
 
 # Pi3 is used once for Eq. (4) keyframe selection and post-BA dense depth.
-KEYFRAME_PROJECTION_THRESHOLD = 0.5
+KEYFRAME_PROJECTION_THRESHOLD = 0.7
 POINTS_PER_QUERY_FRAME = 2048
 QUERY_METHODS = ["sp", "sift"]
 QUERY_DETECTION_THRESHOLD = 0.005
 QUERY_BUCKET_GRID = (8, 6)  # columns, rows
 QUERY_CANDIDATE_MULTIPLIER = 4
-TRACK_CONFIDENCE_THRESHOLD = 0.2
+TRACK_VISIBILITY_THRESHOLD = 0.05
+TRACK_SCORE_THRESHOLD = 0.5
 TRACKER_SIZE = 1024
 FINE_TRACKING = True
 MIXED_PRECISION = "fp16"  # "none", "fp16", or "bf16"
@@ -83,7 +84,7 @@ MAX_REPROJECTION_ERROR_PX = 4.0
 # "pi3" replaces DepthAnything with a Pi3 local point map after sparse BA.
 DENSE_RECONSTRUCTION = "pi3"  # "none" or "pi3"
 DENSE_ALIGNMENT = "disparity_affine"  # "scale" or "disparity_affine"
-PI3_MASK_CONFIDENCE_THRESHOLD = 0.1
+PI3_MASK_CONFIDENCE_THRESHOLD = 0.3
 DEPTH_CONFIDENCE_THRESHOLD = 0.1
 SCALE_RANSAC_THRESHOLD = 0.1
 DISPARITY_RANSAC_RATIO = 30.0
@@ -102,7 +103,8 @@ class VGGSfMTrackOutput:
     tracks: torch.Tensor
     visibility: torch.Tensor
     score: torch.Tensor
-    confidence_threshold: float
+    visibility_threshold: float
+    score_threshold: float
 
 
 @dataclass(frozen=True)
@@ -131,7 +133,8 @@ class VGGSfMTrackFrontend(nn.Module):
         self,
         track_predictor: nn.Module,
         points_per_query_frame: int,
-        track_confidence_threshold: float,
+        track_visibility_threshold: float,
+        track_score_threshold: float,
         tracker_size: int,
         fine_tracking: bool,
         autocast_dtype: torch.dtype | None,
@@ -139,7 +142,8 @@ class VGGSfMTrackFrontend(nn.Module):
         super().__init__()
         self.track_predictor = track_predictor
         self.points_per_query_frame = points_per_query_frame
-        self.track_confidence_threshold = track_confidence_threshold
+        self.track_visibility_threshold = track_visibility_threshold
+        self.track_score_threshold = track_score_threshold
         self.tracker_size = tracker_size
         self.fine_tracking = fine_tracking
         self.autocast_dtype = autocast_dtype
@@ -228,7 +232,8 @@ class VGGSfMTrackFrontend(nn.Module):
             tracks=tracks.squeeze(dim=0).float(),
             visibility=visibility_original.squeeze(dim=0).float(),
             score=score_original.squeeze(dim=0).float(),
-            confidence_threshold=self.track_confidence_threshold,
+            visibility_threshold=self.track_visibility_threshold,
+            score_threshold=self.track_score_threshold,
         )
 
 
@@ -323,7 +328,8 @@ def _tracks_from_vggsfm(
         & (tracks[..., 0] <= width - 1)
         & (tracks[..., 1] >= 0)
         & (tracks[..., 1] <= height - 1)
-        & (combined_confidence >= output.confidence_threshold)
+        & (output.visibility > output.visibility_threshold)
+        & (output.score > output.score_threshold)
     )
     valid[output.reference_index] = True
     if valid_mask is not None:
@@ -664,6 +670,8 @@ def run_sparse_sfm(
                 images,
                 reference,
                 part,
+                query_points=output.query_points,
+                raw_tracks=output.tracks,
             )
     tracks = _concatenate_tracks(track_parts)
     print(
@@ -1025,6 +1033,8 @@ def save_vggsfm_matching_matrix(
     reference_index: int,
     tracks: Tracks,
     cell_width: int | None = None,
+    query_points: torch.Tensor | None = None,
+    raw_tracks: torch.Tensor | None = None,
 ) -> Path:
     """Draw corresponding points without match lines."""
 
@@ -1060,11 +1070,52 @@ def save_vggsfm_matching_matrix(
     canvas = Image.new("RGB", (2 * cell_width, frame_count * cell_height), "black")
     x_scale = (cell_width - 1) / max(width - 1, 1)
     y_scale = (cell_height - 1) / max(height - 1, 1)
+    raw_query_points = (
+        None
+        if query_points is None
+        else query_points.detach().float().cpu()
+    )
+    raw_track_points = (
+        None
+        if raw_tracks is None
+        else raw_tracks.detach().float().cpu()
+    )
     for target_index in range(frame_count):
         row = Image.new("RGB", (2 * cell_width, cell_height), "black")
         row.paste(image_panel(images[reference_index]), (0, 0))
         row.paste(image_panel(images[target_index]), (cell_width, 0))
         draw = ImageDraw.Draw(row, "RGBA")
+        if raw_query_points is not None:
+            finite_queries = torch.isfinite(raw_query_points).all(dim=-1)
+            for xy in raw_query_points[finite_queries]:
+                x = float(xy[0]) * x_scale
+                y = float(xy[1]) * y_scale
+                radius = 2.0
+                draw.ellipse(
+                    (x - radius, y - radius, x + radius, y + radius),
+                    fill=(180, 180, 180, 140),
+                )
+
+        raw_target_count = 0
+        if raw_track_points is not None:
+            target_points = raw_track_points[target_index]
+            raw_target_valid = (
+                torch.isfinite(target_points).all(dim=-1)
+                & (target_points[:, 0] >= 0)
+                & (target_points[:, 0] <= width - 1)
+                & (target_points[:, 1] >= 0)
+                & (target_points[:, 1] <= height - 1)
+            )
+            raw_target_count = int(raw_target_valid.sum())
+            for xy in target_points[raw_target_valid]:
+                x = cell_width + float(xy[0]) * x_scale
+                y = float(xy[1]) * y_scale
+                radius = 2.0
+                draw.ellipse(
+                    (x - radius, y - radius, x + radius, y + radius),
+                    fill=(180, 180, 180, 140),
+                )
+
         valid_indices = torch.nonzero(
             tracks.mask[reference_index] & tracks.mask[target_index],
             as_tuple=False,
@@ -1088,9 +1139,10 @@ def save_vggsfm_matching_matrix(
                 )
         label = (
             f"reference {reference_index:04d}  target {target_index:04d}  "
+            f"raw {raw_target_count}  "
             f"shown {int(valid_indices.numel())} / valid {valid_count}"
         )
-        draw.rectangle((4, 4, 375, 23), fill=(0, 0, 0, 210))
+        draw.rectangle((4, 4, 445, 23), fill=(0, 0, 0, 210))
         draw.text((8, 7), label, fill=(255, 255, 255, 255))
         canvas.paste(row, (0, target_index * cell_height))
     path = output_dir / f"reference_{reference_index:04d}.png"
@@ -1322,7 +1374,8 @@ def main() -> None:
     frontend = VGGSfMTrackFrontend(
         tracker,
         points_per_query_frame=POINTS_PER_QUERY_FRAME,
-        track_confidence_threshold=TRACK_CONFIDENCE_THRESHOLD,
+        track_visibility_threshold=TRACK_VISIBILITY_THRESHOLD,
+        track_score_threshold=TRACK_SCORE_THRESHOLD,
         tracker_size=TRACKER_SIZE,
         fine_tracking=FINE_TRACKING,
         autocast_dtype=autocast_dtype,
