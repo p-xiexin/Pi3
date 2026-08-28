@@ -220,12 +220,12 @@ class FactorGraph:
             source, target, weight = int(source), int(target), float(weight)
             key = (source, target)
             edge = (source, target, relative.clone(), weight)
-            previous = self.edge_lookup.get(key)
-            if previous is None:
+            # Sliding packets are consumed chronologically.  The first verified
+            # measurement therefore owns an overlapping frame pair; later
+            # windows extend the graph without rewriting its established part.
+            if key not in self.edge_lookup:
                 self.edge_lookup[key] = len(self.edges)
                 self.edges.append(edge)
-            elif weight > self.edges[previous][3]:
-                self.edges[previous] = edge
         return known
 
     def _view(self, frame_ids, scope):

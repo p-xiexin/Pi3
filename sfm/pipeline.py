@@ -79,12 +79,26 @@ class CachedFrontend:
             packet = tracker.track(window_ids)
             packet["kind"] = "sliding"
             packets.append(packet_to_cpu(packet))
+            relative_scale = (
+                1.0
+                if index == 0
+                else float(self.frames.dense[int(window_ids[-1])][3])
+            )
             print(
                 f"frontend {index + 1}/{len(windows)} "
                 f"frames={window_ids[0]}..{window_ids[-1]} "
-                f"keyframes={packet['keyframes'].tolist()}"
+                f"keyframes={packet['keyframes'].tolist()} "
+                f"relative_scale={relative_scale:.6g}"
             )
         return packets
+
+    def _save_sliding_diagnostics(self, packets):
+        """Render sliding-window diagnostics before committing the frontend cache."""
+        match_dir = self.cache_path.parent / "match"
+        match_images = save_match_images(
+            match_dir, packets, self.frames, self.dataset
+        )
+        print(f"sliding match images={len(match_images)} path={match_dir}")
 
     def _sliding_packets(self):
         if self.cache_path.exists():
@@ -106,6 +120,7 @@ class CachedFrontend:
             self.loop_cache_path.unlink()
             print(f"stale loop cache removed path={self.loop_cache_path}")
         packets = self._build_sliding_packets()
+        self._save_sliding_diagnostics(packets)
         save_frontend_cache(self.cache_path, packets, self.frames)
         print(
             f"frontend cache saved packets={len(packets)} path={self.cache_path}"
@@ -152,6 +167,12 @@ class CachedFrontend:
             )
         return packets
 
+    def _save_loop_diagnostics(self, packets):
+        """Render loop diagnostics before committing the loop cache."""
+        loop_dir = self.cache_path.parent / "loop"
+        loop_images = save_loop_match_images(loop_dir, packets, self.frames)
+        print(f"loop match images={len(loop_images)} path={loop_dir}")
+
     def _loop_packets(self, sliding_packets, rebuilt_frontend):
         if not self.config["loop"]:
             return []
@@ -171,6 +192,7 @@ class CachedFrontend:
             f"local_pairs={len(local_pairs) // 2} windows={len(windows)} "
             f"accepted={len(packets)}"
         )
+        self._save_loop_diagnostics(packets)
         save_loop_cache(self.loop_cache_path, packets)
         print(
             f"RGB SALAD loop cache saved packets={len(packets)} "
@@ -179,25 +201,10 @@ class CachedFrontend:
         release_device_memory(self.config["device"])
         return packets
 
-    def _save_diagnostics(self, packets):
-        match_dir = self.cache_path.parent / "match"
-        match_images = save_match_images(
-            match_dir, packets.sliding, self.frames, self.dataset
-        )
-        print(f"sliding match images={len(match_images)} path={match_dir}")
-
-        loop_dir = self.cache_path.parent / "loop"
-        loop_packets = packets.loop if self.config["loop"] else []
-        loop_images = save_loop_match_images(loop_dir, loop_packets, self.frames)
-        if self.config["loop"]:
-            print(f"loop match images={len(loop_images)} path={loop_dir}")
-
     def run(self):
         sliding_packets, rebuilt_frontend = self._sliding_packets()
         loop_packets = self._loop_packets(sliding_packets, rebuilt_frontend)
-        packets = FrontendPackets(sliding_packets, loop_packets)
-        self._save_diagnostics(packets)
-        return packets
+        return FrontendPackets(sliding_packets, loop_packets)
 
 
 class GraphBackend:

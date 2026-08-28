@@ -198,10 +198,15 @@ def reconstruct(graph, frames):
 
         pose = graph.poses[frame_id]
         dtype = pose.dtype
-        image, stored_depth, confidence = frames.dense[frame_id]
+        image, stored_depth, confidence, frame_scale = frames.dense[frame_id]
         image = image.to(device=device)
         stored_depth = stored_depth.to(device=device, dtype=dtype)
         confidence = confidence.to(device=device, dtype=dtype)
+        frame_scale = torch.as_tensor(frame_scale, device=device, dtype=dtype)
+        if frame_scale.ndim != 0 or not bool(torch.isfinite(frame_scale)) or not bool(
+            frame_scale > 0
+        ):
+            raise ValueError(f"frame {frame_id} Pi3 scale must be finite and positive")
         if stored_depth.ndim == 3 and stored_depth.shape[-1] == 3:
             predicted_depth = stored_depth[..., 2]
         elif stored_depth.ndim == 2:
@@ -244,7 +249,7 @@ def reconstruct(graph, frames):
 
         predicted_disparity = predicted_depth.reciprocal()
         aligned_disparity = scale * predicted_disparity + shift
-        aligned_depth = aligned_disparity.reciprocal()
+        aligned_depth = aligned_disparity.reciprocal() * frame_scale
         height, width = aligned_depth.shape
         ys, xs = torch.meshgrid(
             torch.arange(height, device=device, dtype=dtype),
@@ -269,6 +274,10 @@ def reconstruct(graph, frames):
         )
         if not mask.any():
             continue
+        print(
+            f"dense reconstruction frame={frame_id} "
+            f"relative_scale={float(frame_scale):.6g}"
+        )
         valid_ids = point_ids[valid]
         inlier_points[valid_ids[local_inliers]] = True
         dense_points.append(world[mask].cpu())

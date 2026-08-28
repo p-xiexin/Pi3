@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 
-CACHE_FORMAT = "geometric_sfm_v4_five_column_visualization"
+CACHE_FORMAT = "geometric_sfm_v5_dense_chunk_scale"
 
 
 def _map_tensors(value, transform):

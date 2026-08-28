@@ -1,11 +1,17 @@
 """Sliding-window geometry, stable image queries, and verified track factors."""
 
+import math
 from dataclasses import dataclass
 
 import torch
 
 from .geometric_verification import verify_packet
 from .keyframes import select_keyframes_eq4_window
+from .scale_metric import (
+    MIN_SCALE_POINTS,
+    SCALE_SAMPLE_POINTS,
+    estimate_chunk_scale,
+)
 from .tracks import sample_map
 
 
@@ -41,14 +47,18 @@ class FrameStore:
         self.track_ids = {}
         self.next_track_id = 0
 
-    def add_dense(self, frame_id, image, points, confidence):
+    def add_dense(self, frame_id, image, points, confidence, scale=1.0):
         """Cache one RGB image, depth map, and confidence map for each frame."""
         frame_id = int(frame_id)
         if frame_id not in self.dense:
-            self.dense[frame_id] = tuple(
+            scale = float(scale)
+            if not math.isfinite(scale) or scale <= 0:
+                raise ValueError("cached Pi3 depth scale must be finite and positive")
+            stored = tuple(
                 value.detach().cpu()
                 for value in (image, points[..., 2], confidence)
             )
+            self.dense[frame_id] = (*stored, scale)
 
     def add_keyframe(self, frame_id, image, points, confidence, keys, queries, anchors, weights):
         """Store one keyframe and assign every image query a stable track ID."""
@@ -100,6 +110,43 @@ class WindowTracker:
         )
         self.keyframe_max_interval = int(config.get("keyframe_max_interval", 5))
         self.processed_pairs = set()
+
+    def _chunk_scale(self, frame_ids, depth, confidence):
+        """Align one raw Pi3 chunk to cached depths from its overlap frames."""
+        if all(int(frame_id) in self.frames.dense for frame_id in frame_ids):
+            return depth.new_tensor(1.0)
+        overlap = [
+            (local, int(frame_id))
+            for local, frame_id in enumerate(frame_ids)
+            if int(frame_id) in self.frames.dense
+        ]
+        if not overlap:
+            return depth.new_tensor(1.0)
+        local_ids = torch.tensor(
+            [local for local, _ in overlap], device=depth.device, dtype=torch.long
+        )
+        overlap_ids = [frame_id for _, frame_id in overlap]
+        reference_depth = torch.stack(
+            [self.frames.dense[frame_id][1].to(depth) for frame_id in overlap_ids]
+        )
+        reference_confidence = torch.stack(
+            [
+                self.frames.dense[frame_id][2].to(confidence)
+                for frame_id in overlap_ids
+            ]
+        )
+        reference_scale = depth.new_tensor(
+            [self.frames.dense[frame_id][3] for frame_id in overlap_ids]
+        )
+        return estimate_chunk_scale(
+            depth[local_ids],
+            reference_depth,
+            reference_scale,
+            current_confidence=confidence[local_ids],
+            reference_confidence=reference_confidence,
+            sample_points=SCALE_SAMPLE_POINTS,
+            minimum_points=MIN_SCALE_POINTS,
+        )
 
     def _valid_tracks(self, output, valid_mask):
         """Apply the graph observation checks to tracks from one reference frame."""
@@ -311,9 +358,14 @@ class WindowTracker:
         poses = geometry["camera_poses"].squeeze(0)
         poses = torch.linalg.inv(poses[0])[None] @ poses
         K = self.frames.K.to(self.device).expand(len(frame_ids), -1, -1).clone()
+        scale = self._chunk_scale(frame_ids, points[..., 2], dense_confidence)
         for local, frame_id in enumerate(frame_ids):
             self.frames.add_dense(
-                frame_id, images[local], points[local], dense_confidence[local]
+                frame_id,
+                images[local],
+                points[local],
+                dense_confidence[local],
+                scale=scale,
             )
         return WindowState(
             frame_ids=frame_ids,
