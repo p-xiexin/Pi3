@@ -276,7 +276,7 @@ class GraphBackend:
         return result
 
     def _export_reconstruction(self, graph):
-        from .export import save_ply
+        from .export import save_camera_wireframes, save_ply
 
         result = reconstruct(graph, self.frames)
         save_ply(
@@ -292,6 +292,14 @@ class GraphBackend:
             result["dense_points"],
             result["dense_colors"],
             scalar_fields={"frame_id": result["dense_frame_ids"]},
+        )
+        camera_frame_ids = sorted(graph.poses)
+        (self.output_dir / "camera_poses.ply").unlink(missing_ok=True)
+        save_camera_wireframes(
+            self.output_dir / "camera_poses.obj",
+            torch.stack([graph.poses[frame_id] for frame_id in camera_frame_ids]),
+            result["sparse_points"],
+            camera_frame_ids,
         )
 
     def run(self, packets):

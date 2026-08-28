@@ -215,12 +215,14 @@ class VGGSfMTracks:
         tracks[:, reference] = tracker_queries[None]
         tracks = (tracks - self.coordinate_shift) / self.coordinate_scale
         visible[:, reference] = 1
+        reordered_score[:, reference] = 1
         confidence[:, reference] = 1
         return {
             "tracks": tracks[0].float(),
             "confidence": confidence[0].float(),
             "visualization_confidence": visible[0].float(),
-            "visualization_confidence_label": "vgg visibility",
+            "visualization_score": reordered_score[0].float(),
+            "visualization_confidence_label": "vgg visible=color score=alpha",
         }
 
 

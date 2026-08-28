@@ -222,34 +222,37 @@ def reconstruct(graph, frames):
         if image.ndim != 3 or image.shape[0] != 3 or image.shape[1:] != predicted_depth.shape:
             raise ValueError(f"frame {frame_id} image and Pi3 depth shapes differ")
 
+        metric_depth = frame_scale * predicted_depth
         optimized = graph.point_positions[point_ids].to(dtype=dtype)
         sparse_camera = torch.einsum(
             "ij,pj->pi", pose[:3, :3], optimized
         ) + pose[:3, 3]
-        sampled_depth = sample_map_at_points(predicted_depth, uv)[:, 0]
+        sampled_metric_depth = sample_map_at_points(metric_depth, uv)[:, 0]
         sampled_confidence = sample_map_at_points(confidence, uv)[:, 0]
         sparse_depth = sparse_camera[:, 2]
         weights = observation_weights.to(dtype=dtype) * sampled_confidence
         valid = (
-            torch.isfinite(sampled_depth)
+            torch.isfinite(sampled_metric_depth)
             & torch.isfinite(sparse_depth)
             & torch.isfinite(weights)
-            & (sampled_depth > 0)
+            & (sampled_metric_depth > 0)
             & (sparse_depth > 0)
             & (weights > 0)
         )
         if int(valid.sum()) < MIN_DENSE_ALIGNMENT_POINTS:
             continue
         try:
-            scale, shift, local_inliers = fit_disparity_affine(
-                sampled_depth[valid], sparse_depth[valid], weights[valid]
+            disparity_scale, disparity_shift, local_inliers = fit_disparity_affine(
+                sampled_metric_depth[valid], sparse_depth[valid], weights[valid]
             )
         except RuntimeError:
             continue
 
-        predicted_disparity = predicted_depth.reciprocal()
-        aligned_disparity = scale * predicted_disparity + shift
-        aligned_depth = aligned_disparity.reciprocal() * frame_scale
+        predicted_disparity = metric_depth.reciprocal()
+        aligned_disparity = (
+            disparity_scale * predicted_disparity + disparity_shift
+        )
+        aligned_depth = aligned_disparity.reciprocal()
         height, width = aligned_depth.shape
         ys, xs = torch.meshgrid(
             torch.arange(height, device=device, dtype=dtype),
@@ -276,7 +279,9 @@ def reconstruct(graph, frames):
             continue
         print(
             f"dense reconstruction frame={frame_id} "
-            f"relative_scale={float(frame_scale):.6g}"
+            f"relative_scale={float(frame_scale):.6g} "
+            f"final_disparity_scale="
+            f"{float(disparity_scale / frame_scale):.6g}"
         )
         valid_ids = point_ids[valid]
         inlier_points[valid_ids[local_inliers]] = True

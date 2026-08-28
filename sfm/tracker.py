@@ -426,6 +426,9 @@ class WindowTracker:
                         "visualization_confidence",
                         tracked["output"]["confidence"],
                     ),
+                    "visualization_score": tracked["output"].get(
+                        "visualization_score"
+                    ),
                     "visualization_confidence_label": tracked["output"].get(
                         "visualization_confidence_label", "confidence"
                     ),

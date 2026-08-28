@@ -58,9 +58,9 @@ def _scalar_panel(values, width, height, normalize=False):
 
 
 def _sparse_confidence_panel(
-    points, values, source_width, source_height, width, height
+    points, values, source_width, source_height, width, height, opacity=None
 ):
-    """Rasterize per-track VGGSfM confidence values at their target pixels."""
+    """Rasterize sparse color values with optional per-point opacity."""
     panel = Image.new("RGB", (width, height), "black")
     if points is None or values is None:
         return panel
@@ -70,6 +70,10 @@ def _sparse_confidence_panel(
         raise ValueError("sparse confidence points must have shape [P,2]")
     if values.shape != points.shape[:1]:
         raise ValueError("sparse confidence values must have shape [P]")
+    if opacity is not None:
+        opacity = opacity.detach().cpu().float()
+        if opacity.shape != points.shape[:1]:
+            raise ValueError("sparse confidence opacity must have shape [P]")
     valid = (
         torch.isfinite(points).all(-1)
         & torch.isfinite(values)
@@ -78,14 +82,19 @@ def _sparse_confidence_panel(
         & (points[:, 1] >= 0)
         & (points[:, 1] <= source_height - 1)
     )
+    if opacity is not None:
+        valid &= torch.isfinite(opacity)
     indices = torch.nonzero(valid, as_tuple=False).squeeze(-1)
     if not indices.numel():
         return panel
-    indices = indices[values[indices].argsort()]
+    strength = values[indices].clamp(0, 1)
+    if opacity is not None:
+        strength *= opacity[indices].clamp(0, 1)
+    indices = indices[strength.argsort()]
     x_scale = (width - 1) / max(source_width - 1, 1)
     y_scale = (height - 1) / max(source_height - 1, 1)
     radius = max(round(width / 112), 2)
-    draw = ImageDraw.Draw(panel)
+    draw = ImageDraw.Draw(panel, "RGBA")
     for index in indices.tolist():
         x = float(points[index, 0]) * x_scale
         y = float(points[index, 1]) * y_scale
@@ -93,8 +102,14 @@ def _sparse_confidence_panel(
             int(channel)
             for channel in _heat_rgb(values[index].clamp(0, 1)).mul(255).round()
         )
+        alpha = (
+            255
+            if opacity is None
+            else round(float(opacity[index].clamp(0, 1)) * 255)
+        )
         draw.ellipse(
-            (x - radius, y - radius, x + radius, y + radius), fill=color
+            (x - radius, y - radius, x + radius, y + radius),
+            fill=(*color, alpha),
         )
     return panel
 
@@ -170,6 +185,12 @@ def _matrix_groups(packets):
                 if visualization_confidence is None
                 else visualization_confidence.detach().cpu().float()
             )
+            visualization_score = diagnostic.get("visualization_score")
+            visualization_score = (
+                None
+                if visualization_score is None
+                else visualization_score.detach().cpu().float()
+            )
             confidence_label = diagnostic.get(
                 "visualization_confidence_label", "confidence"
             )
@@ -205,6 +226,10 @@ def _matrix_groups(packets):
                     raise ValueError(
                         "visualization confidence must have shape [S,P] or [S,H,W]"
                     )
+            if visualization_score is not None and tuple(
+                visualization_score.shape
+            ) != (len(diagnostic_frame_ids), query_points.shape[0]):
+                raise ValueError("visualization score must have shape [S,P]")
 
             group = groups.setdefault(
                 reference,
@@ -235,6 +260,11 @@ def _matrix_groups(packets):
                         None
                         if visualization_confidence is None
                         else visualization_confidence[local_target]
+                    ),
+                    "score": (
+                        None
+                        if visualization_score is None
+                        else visualization_score[local_target]
                     ),
                     "confidence_label": confidence_label,
                 }
@@ -293,6 +323,7 @@ def _confidence_panel(raw, matches, source_width, source_height, width, height):
                 source_height,
                 width,
                 height,
+                opacity=raw.get("score"),
             ), raw.get("confidence_label", "confidence")
         raise ValueError("pair confidence must have shape [P] or [H,W]")
     if matches:
