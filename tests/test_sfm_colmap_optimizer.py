@@ -5,7 +5,11 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from sfm.colmap_optimizer import _load_pycolmap, optimize_view_colmap
+from sfm.colmap_optimizer import (
+    _load_pycolmap,
+    optimize_view_colmap,
+    optimize_view_colmap_two_rounds,
+)
 from sfm.factor_graph import FactorGraph
 from sfm.optimizer import _project
 
@@ -203,7 +207,7 @@ class ColmapOptimizerTest(unittest.TestCase):
         self.assertEqual(state.options.ceres.loss_function_scale, 2.0)
         self.assertEqual(state.options.ceres.loss_function_type, "cauchy")
         self.assertTrue(state.options.refine_principal_point)
-        self.assertTrue(state.options.refine_extra_params)
+        self.assertFalse(state.options.refine_extra_params)
         self.assertTrue(state.options.refine_rig_from_world)
         self.assertFalse(state.options.refine_sensor_from_rig)
         self.assertTrue(state.options.refine_focal_length)
@@ -243,6 +247,71 @@ class ColmapOptimizerTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "at most one observation"):
                 optimize_view_colmap(view, [0], 1)
 
+    def test_two_round_colmap_uses_shared_filtering_protocol(self):
+        dtype = torch.float64
+        poses = torch.eye(4, dtype=dtype).repeat(3, 1, 1)
+        poses[:, 0, 3] = torch.tensor([0.0, -0.2, -0.4], dtype=dtype)
+        points = torch.tensor(
+            [[0.1, 0.0, 4.0], [-0.2, 0.1, 5.0]], dtype=dtype
+        )
+        K = torch.tensor(
+            [[100.0, 0.0, 32.0], [0.0, 100.0, 24.0], [0.0, 0.0, 1.0]],
+            dtype=dtype,
+        ).repeat(3, 1, 1)
+        ii = torch.arange(3).repeat_interleave(2)
+        jj = torch.arange(2).repeat(3)
+        distortion = torch.zeros(3, 4, dtype=dtype)
+        uv, _ = _project(poses, points, K, distortion, ii, jj)
+        uv[-1, 0] += 4.01
+        view = {
+            "frame_ids": torch.tensor([2, 4, 7]),
+            "poses": poses,
+            "points": points,
+            "K": K,
+            "distortion": distortion,
+            "ii": ii,
+            "jj": jj,
+            "uv": uv,
+            "weight": torch.ones(ii.numel(), dtype=dtype),
+        }
+        observation_counts = []
+
+        def passthrough(current, fixed_ids, iterations):
+            observation_counts.append(int(current["ii"].numel()))
+            return {
+                "poses": current["poses"].clone(),
+                "points": current["points"].clone(),
+                "K": current["K"].clone(),
+                "distortion": current["distortion"].clone(),
+                "ba_backend": "colmap",
+            }
+
+        with patch(
+            "sfm.colmap_optimizer.optimize_view_colmap",
+            side_effect=passthrough,
+        ):
+            result = optimize_view_colmap_two_rounds(
+                view,
+                [0],
+                bearing_iterations=0,
+                first_iterations=7,
+                second_iterations=3,
+            )
+
+        self.assertEqual(observation_counts, [6, 3])
+        self.assertEqual(int(result["first_inlier_observations"]), 3)
+        self.assertEqual(int(result["valid_observations"]), 3)
+        self.assertTrue(
+            torch.equal(result["point_inliers"], torch.tensor([True, False]))
+        )
+        self.assertTrue(
+            torch.equal(
+                result["observation_inliers"],
+                torch.tensor([True, False, True, False, True, False]),
+            )
+        )
+        self.assertEqual(result["ba_backend"], "colmap")
+
     def test_factor_graph_dispatches_colmap_and_commits_intrinsics(self):
         graph = FactorGraph(None)
         graph.poses = {3: torch.eye(4)}
@@ -277,7 +346,8 @@ class ColmapOptimizerTest(unittest.TestCase):
         }
 
         with patch(
-            "sfm.colmap_optimizer.optimize_view_colmap", return_value=backend_result
+            "sfm.colmap_optimizer.optimize_view_colmap_two_rounds",
+            return_value=backend_result,
         ) as backend:
             result = graph.optimize(view, [3], 5, backend="colmap")
 

@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 
-CACHE_FORMAT = "geometric_sfm_v6_vgg_visible_score"
+CACHE_FORMAT = "geometric_sfm_v7_pi3_centers"
 
 
 def _map_tensors(value, transform):
@@ -103,6 +103,11 @@ def save_frontend_cache(path, packets, frames):
         for part in packet["parts"]
     ):
         raise ValueError("data.h5 requires stable track IDs in every packet part")
+    if any(
+        "pi3_T_WCs" not in packet or "metric_scale" not in packet
+        for packet in packets
+    ):
+        raise ValueError("data.h5 requires raw Pi3 window poses and metric scale")
     _save_payload(
         path,
         {

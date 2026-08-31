@@ -31,6 +31,7 @@ class WindowState:
     dense_confidence: torch.Tensor
     track_valid_mask: torch.Tensor
     poses: torch.Tensor
+    metric_scale: torch.Tensor
     K: torch.Tensor
 
 
@@ -376,6 +377,7 @@ class WindowTracker:
             dense_confidence=dense_confidence,
             track_valid_mask=track_valid_mask,
             poses=poses,
+            metric_scale=scale,
             K=K,
         )
 
@@ -474,6 +476,8 @@ class WindowTracker:
                 dtype=torch.long,
             ),
             "poses": torch.linalg.inv(window.poses),
+            "pi3_T_WCs": window.poses,
+            "metric_scale": window.metric_scale,
             "K": window.K,
             "parts": parts,
             "edges": [],

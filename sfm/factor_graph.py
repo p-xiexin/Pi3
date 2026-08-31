@@ -38,6 +38,9 @@ class FactorGraph:
         self.anchor_observed = set()
         self.edges = []
         self.edge_lookup = {}
+        self.pi3_edge_keys = set()
+        self.first_sliding_root_frame_id = None
+        self.first_sliding_midpoint_frame_id = None
 
     @property
     def frame_ids(self):
@@ -170,6 +173,15 @@ class FactorGraph:
                     )
             resolved_parts.append((part, point_ids))
         frame_ids = packet["frame_ids"].tolist()
+        if (
+            packet_kind == "sliding"
+            and self.first_sliding_midpoint_frame_id is None
+            and len(frame_ids) > 1
+        ):
+            self.first_sliding_root_frame_id = int(frame_ids[0])
+            self.first_sliding_midpoint_frame_id = int(
+                frame_ids[len(frame_ids) // 2]
+            )
         known = [frame_id for frame_id in frame_ids if frame_id in self.poses]
         if known:
             anchor = known[0]
@@ -214,7 +226,28 @@ class FactorGraph:
                     )
                 )
                 self.next_observation_id += count
+        pi3_T_WCs = None
+        pi3_T_CWs = None
+        pi3_local = None
+        if packet_kind == "sliding" and "pi3_T_WCs" in packet:
+            pi3_T_WCs = packet["pi3_T_WCs"].clone()
+            metric_scale = torch.as_tensor(
+                packet["metric_scale"],
+                device=pi3_T_WCs.device,
+                dtype=pi3_T_WCs.dtype,
+            )
+            pi3_T_WCs[:, :3, 3] *= metric_scale
+            pi3_T_CWs = torch.linalg.inv(pi3_T_WCs)
+            pi3_local = {
+                int(frame_id): index for index, frame_id in enumerate(frame_ids)
+            }
         for source, target, relative, weight in packet["edges"]:
+            pi3_relative = pi3_T_WCs is not None
+            if pi3_relative:
+                relative = (
+                    pi3_T_CWs[pi3_local[int(target)]]
+                    @ pi3_T_WCs[pi3_local[int(source)]]
+                )
             if source > target:
                 source, target, relative = target, source, torch.linalg.inv(relative)
             source, target, weight = int(source), int(target), float(weight)
@@ -226,6 +259,8 @@ class FactorGraph:
             if key not in self.edge_lookup:
                 self.edge_lookup[key] = len(self.edges)
                 self.edges.append(edge)
+                if pi3_relative:
+                    self.pi3_edge_keys.add(key)
         return known
 
     def _view(self, frame_ids, scope):
@@ -305,7 +340,11 @@ class FactorGraph:
 
     def full_view(self):
         """Build the full-sequence view consumed by global BA."""
-        return self._view(sorted(self.poses), "global")
+        view = self._view(sorted(self.poses), "global")
+        if self.first_sliding_midpoint_frame_id is not None:
+            view["scale_gauge_root_frame_id"] = self.first_sliding_root_frame_id
+            view["scale_gauge_frame_id"] = self.first_sliding_midpoint_frame_id
+        return view
 
     def initialize_global(self):
         """Initialize cameras from verified edges and landmarks by multiview DLT."""
@@ -316,22 +355,56 @@ class FactorGraph:
             for source, target, relative, weight in self.edges
             if source in local and target in local
         ]
+        pi3_edges = [
+            (local[source], local[target], relative, weight)
+            for source, target, relative, weight in self.edges
+            if source in local
+            and target in local
+            and (source, target) in self.pi3_edge_keys
+        ]
         if len(frame_ids) > 1 and not edges:
             raise RuntimeError("global pose graph has no edges")
         device = self.poses[frame_ids[0]].device
         if len(frame_ids) == 1:
             poses = torch.stack([self.poses[frame_ids[0]]])
         else:
+            mst_edges = pi3_edges or edges
+            print(
+                f"global pose initialization="
+                f"{'pi3_metric' if pi3_edges else 'essential'} "
+                f"mst_edges={len(mst_edges)} rotation_edges={len(edges)}"
+            )
+            mst_source = torch.tensor(
+                [edge[0] for edge in mst_edges], device=device
+            )
+            mst_target = torch.tensor(
+                [edge[1] for edge in mst_edges], device=device
+            )
+            mst_relative = torch.stack([edge[2] for edge in mst_edges])
+            mst_weight = torch.tensor(
+                [edge[3] for edge in mst_edges],
+                device=device,
+                dtype=mst_relative.dtype,
+            )
+            try:
+                poses = maximum_spanning_tree(
+                    len(frame_ids),
+                    mst_source,
+                    mst_target,
+                    mst_relative,
+                    mst_weight,
+                )
+            except RuntimeError as error:
+                if pi3_edges:
+                    raise RuntimeError(
+                        "metric-scaled Pi3 sliding pose graph is disconnected"
+                    ) from error
+                raise
             source = torch.tensor([edge[0] for edge in edges], device=device)
             target = torch.tensor([edge[1] for edge in edges], device=device)
             relative = torch.stack([edge[2] for edge in edges])
             weight = torch.tensor(
-                [edge[3] for edge in edges],
-                device=device,
-                dtype=relative.dtype,
-            )
-            poses = maximum_spanning_tree(
-                len(frame_ids), source, target, relative, weight
+                [edge[3] for edge in edges], device=device, dtype=relative.dtype
             )
             rotations = average_rotations(poses, source, target, relative, weight)
             centers = camera_centers(poses)
@@ -423,12 +496,21 @@ class FactorGraph:
         if not fixed:
             raise ValueError("optimization requires at least one fixed camera")
         if backend == "native":
+            scale_gauge_camera = None
+            if "scale_gauge_frame_id" in view:
+                scale_gauge_root = local[int(view["scale_gauge_root_frame_id"])]
+                if scale_gauge_root not in fixed:
+                    raise ValueError(
+                        "global fixed cameras must include the first sliding frame"
+                    )
+                scale_gauge_camera = local[int(view["scale_gauge_frame_id"])]
             result = optimize_view_two_rounds(
                 view,
                 fixed,
                 bearing_iterations=15,
                 first_iterations=int(iterations),
                 second_iterations=10,
+                scale_gauge_camera=scale_gauge_camera,
             )
             result["ba_backend"] = "native"
         elif backend == "colmap":

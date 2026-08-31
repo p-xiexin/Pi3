@@ -156,22 +156,39 @@ def _schur_step(Jc, Jx, rhs, weight, ii, jj, camera_count, point_count, fixed, g
     return dc, dpoints
 
 
-def _select_scale_gauge(centers, fixed, active=None):
-    """Choose a well-separated camera to preserve the initial monocular scale."""
+def _select_scale_gauge(centers, fixed, active=None, camera=None):
+    """Freeze one initial baseline as the monocular scale gauge."""
     if active is None:
         active = torch.ones_like(fixed)
+    explicit_camera = camera is not None
     fixed_ids = torch.nonzero(fixed & active, as_tuple=False).squeeze(-1)
     if not fixed_ids.numel():
+        if explicit_camera:
+            raise RuntimeError("scale gauge root has no active observations")
         return None
     root = int(fixed_ids[0])
     offsets = centers - centers[root]
-    candidates = torch.nonzero((~fixed) & active, as_tuple=False).squeeze(-1)
-    lengths = offsets[candidates].norm(dim=-1)
-    if not candidates.numel() or lengths.max() <= 1.0e-6:
+    if camera is None:
+        candidates = torch.nonzero((~fixed) & active, as_tuple=False).squeeze(-1)
+        if not candidates.numel():
+            return None
+        lengths = offsets[candidates].norm(dim=-1)
+        camera = int(candidates[int(lengths.argmax())])
+    else:
+        camera = int(camera)
+        if camera < 0 or camera >= centers.shape[0]:
+            raise IndexError("scale gauge camera lies outside the optimizer view")
+        if not bool(active[camera]):
+            raise RuntimeError("scale gauge camera has no active observations")
+        if bool(fixed[camera]):
+            raise ValueError("scale gauge camera must differ from the fixed root")
+    target = offsets[camera].norm()
+    if target <= 1.0e-6:
+        if explicit_camera:
+            raise RuntimeError("scale gauge baseline is degenerate")
         return None
-    camera = int(candidates[int(lengths.argmax())])
-    target = lengths.max()
-    direction = offsets[camera] / target
+    target = target.detach().clone()
+    direction = (offsets[camera] / target).detach().clone()
     return root, camera, direction, target
 
 
@@ -214,12 +231,25 @@ def _stage_fixed_camera_mask(fixed, observation_cameras, camera_count):
     return stage_fixed, active
 
 
-def _bearing_adjust(poses, points, view, fixed, iterations):
+def _validate_scale_gauge(scale_gauge, fixed, active):
+    """Require the persistent gauge baseline to remain in the active problem."""
+    if scale_gauge is None:
+        return
+    root, camera, _, _ = scale_gauge
+    if not bool(active[root]) or not bool(active[camera]):
+        raise RuntimeError("persistent scale gauge camera has no active observations")
+    if not bool(fixed[root]) or bool(fixed[camera]):
+        raise RuntimeError("persistent scale gauge endpoints have invalid fixed state")
+
+
+def _bearing_adjust(poses, points, view, fixed, iterations, scale_gauge=None):
     """Run the Eq. (5)-style center and landmark refinement."""
     ii, jj = view["ii"], view["jj"]
     fixed, active = _stage_fixed_camera_mask(fixed, ii, poses.shape[0])
     centers = camera_centers(poses)
-    scale_gauge = _select_scale_gauge(centers, fixed, active)
+    if scale_gauge is None:
+        scale_gauge = _select_scale_gauge(centers, fixed, active)
+    _validate_scale_gauge(scale_gauge, fixed, active)
     rotations = poses[:, :3, :3].clone()
     uv1 = torch.cat((view["uv"], torch.ones_like(view["uv"][:, :1])), -1)
     rays_camera = torch.einsum("oij,oj->oi", torch.linalg.inv(view["K"])[ii], uv1)
@@ -250,7 +280,15 @@ def _bearing_adjust(poses, points, view, fixed, iterations):
     return poses, points
 
 
-def _bundle_adjust(poses, points, view, fixed, iterations, observation_ids=None):
+def _bundle_adjust(
+    poses,
+    points,
+    view,
+    fixed,
+    iterations,
+    observation_ids=None,
+    scale_gauge=None,
+):
     """Run matrix-free reprojection BA over all or a selected set of observations."""
     if observation_ids is None:
         observation_ids = torch.arange(
@@ -267,7 +305,9 @@ def _bundle_adjust(poses, points, view, fixed, iterations, observation_ids=None)
     uv = view["uv"][observation_ids]
     confidence = view["weight"][observation_ids]
     fixed, active = _stage_fixed_camera_mask(fixed, ii, poses.shape[0])
-    scale_gauge = _select_scale_gauge(camera_centers(poses), fixed, active)
+    if scale_gauge is None:
+        scale_gauge = _select_scale_gauge(camera_centers(poses), fixed, active)
+    _validate_scale_gauge(scale_gauge, fixed, active)
     for _ in range(int(iterations)):
         projection, valid, (Jc, Jx) = _project(
             poses, points, view["K"], view["distortion"], ii, jj, True
@@ -428,6 +468,7 @@ def optimize_view_two_rounds(
     second_iterations=10,
     max_error_px=MAX_REPROJECTION_ERROR_PX,
     min_observations=MIN_TRACK_OBSERVATIONS,
+    scale_gauge_camera=None,
 ):
     """Run Eq. (5), BA, hard filtering, a second BA, and final filtering.
 
@@ -438,11 +479,39 @@ def optimize_view_two_rounds(
     poses = view["poses"].clone()
     points = view["points"].clone()
     fixed = _fixed_camera_mask(poses, fixed_ids)
+    stage_fixed, active = _stage_fixed_camera_mask(
+        fixed, view["ii"], poses.shape[0]
+    )
+    scale_gauge = _select_scale_gauge(
+        camera_centers(poses),
+        fixed if scale_gauge_camera is not None else stage_fixed,
+        active,
+        camera=scale_gauge_camera,
+    )
+    if scale_gauge_camera is not None:
+        root, camera, _, target = scale_gauge
+        frame_ids = view.get("frame_ids")
+        root_id = root if frame_ids is None else int(frame_ids[root])
+        camera_id = camera if frame_ids is None else int(frame_ids[camera])
+        print(
+            f"global scale gauge root={root_id} camera={camera_id} "
+            f"target={float(target):.6g}"
+        )
     poses, points = _bearing_adjust(
-        poses, points, view, fixed, bearing_iterations
+        poses,
+        points,
+        view,
+        fixed,
+        bearing_iterations,
+        scale_gauge=scale_gauge,
     )
     poses, points = _bundle_adjust(
-        poses, points, view, fixed, first_iterations
+        poses,
+        points,
+        view,
+        fixed,
+        first_iterations,
+        scale_gauge=scale_gauge,
     )
     first = filter_reprojection_observations(
         view,
@@ -461,6 +530,7 @@ def optimize_view_two_rounds(
         fixed,
         second_iterations,
         observation_ids=first_ids,
+        scale_gauge=scale_gauge,
     )
     final = filter_reprojection_observations(
         view,

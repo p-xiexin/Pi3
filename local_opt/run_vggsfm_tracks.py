@@ -62,7 +62,6 @@ KEYFRAME_PROJECTION_THRESHOLD = 0.7
 POINTS_PER_QUERY_FRAME = 2048
 QUERY_METHODS = ["sp", "sift"]
 QUERY_DETECTION_THRESHOLD = 0.005
-QUERY_BUCKET_GRID = (8, 6)  # columns, rows
 QUERY_CANDIDATE_MULTIPLIER = 4
 TRACK_VISIBILITY_THRESHOLD = 0.05
 TRACK_SCORE_THRESHOLD = 0.5
@@ -242,7 +241,7 @@ def _select_image_query_points(
     max_points: int,
     valid_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Extract and spatially bucket LightGlue query points."""
+    """Extract LightGlue query points and keep the global top scores."""
 
     from lightglue import ALIKED, SIFT, SuperPoint
 
@@ -291,22 +290,9 @@ def _select_image_query_points(
     if query_points.shape[0] == 0:
         raise RuntimeError("the reference image has no valid query points")
 
-    columns, rows = QUERY_BUCKET_GRID
-    bucket_ids = (
-        pixels[:, 1] * rows // image.shape[-2] * columns
-        + pixels[:, 0] * columns // image.shape[-1]
-    )
-    points_per_bucket, remainder = divmod(max_points, columns * rows)
-    selected = []
-    for bucket_id in range(columns * rows):
-        indices = torch.where(bucket_ids == bucket_id)[0]
-        limit = points_per_bucket + int(bucket_id < remainder)
-        if indices.numel() > limit:
-            indices = indices[scores[indices].topk(limit).indices]
-        if limit:
-            selected.append(indices)
-    selected = torch.cat(selected)
-    query_points, pixels = query_points[selected], pixels[selected]
+    if query_points.shape[0] > max_points:
+        selected = scores.topk(max_points).indices
+        query_points, pixels = query_points[selected], pixels[selected]
     flat_indices = pixels[:, 1] * image.shape[-1] + pixels[:, 0]
     return query_points.to(dtype=image.dtype), flat_indices
 

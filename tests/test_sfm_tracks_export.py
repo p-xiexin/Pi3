@@ -65,12 +65,15 @@ class TracksExportTest(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as directory:
+            stale = Path(directory) / "p99.ply"
+            stale.write_bytes(b"stale projection")
             summary = save_ba_tracks(directory, view, frames, transforms)
             root = Path(directory)
             self.assertEqual(
                 {path.name for path in root.iterdir()},
                 {"doc.xml", "points0.ply", "tracks.ply", "p0.ply", "p2.ply"},
             )
+            self.assertFalse(stale.exists())
             self.assertEqual(summary["camera_count"], 2)
             self.assertEqual(summary["point_count"], 2)
             self.assertEqual(summary["observation_count"], 4)

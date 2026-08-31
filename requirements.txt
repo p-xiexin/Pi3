@@ -3,6 +3,7 @@ torchvision==0.20.1
 numpy==1.26.4
 pillow
 opencv-python
+lightglue @ git+https://github.com/cvg/LightGlue.git
 plyfile
 pycolmap==4.1.1
 huggingface_hub
