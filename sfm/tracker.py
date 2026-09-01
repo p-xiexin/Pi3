@@ -12,7 +12,7 @@ from .scale_metric import (
     SCALE_SAMPLE_POINTS,
     estimate_chunk_scale,
 )
-from .tracks import sample_map
+from .tracks import _masked_warp_images, sample_map
 
 
 PI3_VALID_CONFIDENCE = 0.1
@@ -415,6 +415,15 @@ class WindowTracker:
                 track_cache,
             )
             if not is_loop:
+                visualization_warped = None
+                if "visualization_warp" in tracked["output"]:
+                    visualization_warped = _masked_warp_images(
+                        window.images.unsqueeze(0),
+                        reference,
+                        tracked["output"]["visualization_warp_targets"],
+                        tracked["output"]["visualization_warp"],
+                        tracked["output"]["visualization_warp_confidence"],
+                    )
                 visualization.append({
                     "frontend": getattr(self.tracks_model, "name", "unknown"),
                     "reference": frame_id,
@@ -431,6 +440,7 @@ class WindowTracker:
                     "visualization_score": tracked["output"].get(
                         "visualization_score"
                     ),
+                    "visualization_warped": visualization_warped,
                     "visualization_confidence_label": tracked["output"].get(
                         "visualization_confidence_label", "confidence"
                     ),

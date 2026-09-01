@@ -11,10 +11,14 @@ def _rgb_image(image):
     """Convert one stored CHW float image into a PIL RGB image."""
     if image.ndim != 3 or image.shape[0] != 3:
         raise ValueError("match visualization image must have shape [3,H,W]")
-    array = (
-        image.detach().cpu().float().clamp(0, 1).permute(1, 2, 0).mul(255)
-        .round().to(torch.uint8).numpy()
-    )
+    image = image.detach().cpu()
+    if image.dtype == torch.uint8:
+        array = image.permute(1, 2, 0).numpy()
+    else:
+        array = (
+            image.float().clamp(0, 1).permute(1, 2, 0).mul(255)
+            .round().to(torch.uint8).numpy()
+        )
     return Image.fromarray(array, mode="RGB")
 
 
@@ -191,6 +195,12 @@ def _matrix_groups(packets):
                 if visualization_score is None
                 else visualization_score.detach().cpu().float()
             )
+            visualization_warped = diagnostic.get("visualization_warped")
+            visualization_warped = (
+                None
+                if visualization_warped is None
+                else visualization_warped.detach().cpu()
+            )
             confidence_label = diagnostic.get(
                 "visualization_confidence_label", "confidence"
             )
@@ -230,6 +240,12 @@ def _matrix_groups(packets):
                 visualization_score.shape
             ) != (len(diagnostic_frame_ids), query_points.shape[0]):
                 raise ValueError("visualization score must have shape [S,P]")
+            if visualization_warped is not None and (
+                visualization_warped.ndim != 4
+                or visualization_warped.shape[0] != len(diagnostic_frame_ids)
+                or visualization_warped.shape[1] != 3
+            ):
+                raise ValueError("visualization warped RGB must have shape [S,3,H,W]")
 
             group = groups.setdefault(
                 reference,
@@ -265,6 +281,11 @@ def _matrix_groups(packets):
                         None
                         if visualization_score is None
                         else visualization_score[local_target]
+                    ),
+                    "warped": (
+                        None
+                        if visualization_warped is None
+                        else visualization_warped[local_target]
                     ),
                     "confidence_label": confidence_label,
                 }
@@ -309,6 +330,10 @@ def _raw_masks(raw, width, height):
 
 def _confidence_panel(raw, matches, source_width, source_height, width, height):
     """Render dense Glob3R confidence or sparse VGGSfM visibility."""
+    if raw is not None and raw.get("warped") is not None:
+        return _rgb_image(raw["warped"]).resize(
+            (width, height), Image.Resampling.BICUBIC
+        ), raw.get("confidence_label", "glob3r warp")
     if raw is not None and raw.get("confidence") is not None:
         confidence = raw["confidence"]
         if confidence.ndim == 2:

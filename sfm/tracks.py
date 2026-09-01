@@ -7,6 +7,9 @@ import torch
 import torch.nn.functional as F
 
 
+GLOB3R_VISUALIZATION_CONFIDENCE = 0.6
+
+
 def sample_map(values, points):
     """Sample an ``H x W x C`` or ``B x C x H x W`` map at ``P x 2`` pixels."""
     if values.ndim == 3:
@@ -18,6 +21,39 @@ def sample_map(values, points):
     grid = grid[None, None].expand(values.shape[0], -1, -1, -1)
     sampled = F.grid_sample(values, grid, mode="bilinear", align_corners=True)
     return sampled[:, :, 0].transpose(1, 2).to(points)
+
+
+def _masked_warp_images(images, reference, targets, warps, confidence):
+    """Warp target RGB into the reference grid and apply the frontend mask."""
+    height, width = images.shape[-2:]
+    pixel_warp = warps.squeeze(0).permute(0, 2, 3, 1)
+    finite = torch.isfinite(pixel_warp).all(-1)
+    valid = (
+        finite
+        & torch.isfinite(confidence.squeeze(0).squeeze(1))
+        & (pixel_warp[..., 0] >= 0)
+        & (pixel_warp[..., 0] <= width - 1)
+        & (pixel_warp[..., 1] >= 0)
+        & (pixel_warp[..., 1] <= height - 1)
+        & (
+            confidence.squeeze(0).squeeze(1)
+            >= GLOB3R_VISUALIZATION_CONFIDENCE
+        )
+    )
+    grid = torch.where(finite[..., None], pixel_warp, 0).clone()
+    grid[..., 0] = 2 * grid[..., 0] / max(width - 1, 1) - 1
+    grid[..., 1] = 2 * grid[..., 1] / max(height - 1, 1) - 1
+    warped = F.grid_sample(
+        images.squeeze(0)[targets],
+        grid,
+        mode="bilinear",
+        align_corners=True,
+    )
+    warped *= valid[:, None]
+    result = images.new_zeros(images.shape[1:])
+    result[reference] = images[0, reference]
+    result[targets] = warped
+    return result.clamp(0, 1).mul(255).round().to(torch.uint8)
 
 
 class Glob3RTracks:
@@ -80,23 +116,13 @@ class Glob3RTracks:
         tracks[targets] = sample_map(warps.squeeze(0), query_points)
         scores[targets] = sample_map(confidence.squeeze(0), query_points).squeeze(-1)
         scores[targets] *= scores[targets] >= 0.6
-        confidence_map = confidence.squeeze(0)
-        if confidence_map.ndim == 4 and confidence_map.shape[1] == 1:
-            confidence_map = confidence_map[:, 0]
-        if confidence_map.ndim != 3:
-            raise RuntimeError(
-                "Glob3R confidence heatmap must have shape [targets,H,W]"
-            )
-        confidence_maps = confidence_map.new_zeros(
-            self.images.shape[1], height, width
-        )
-        confidence_maps[reference] = 1
-        confidence_maps[targets] = confidence_map
         return {
             "tracks": tracks,
             "confidence": scores,
-            "visualization_confidence": confidence_maps,
-            "visualization_confidence_label": "glob3r confidence",
+            "visualization_warp": warps,
+            "visualization_warp_confidence": confidence,
+            "visualization_warp_targets": targets,
+            "visualization_confidence_label": "glob3r warp conf>=0.6",
         }
 
 
