@@ -7,6 +7,19 @@ defaults:
 
 name: glob3r_coarse
 trainer: trainers.glob3r_trainer.Glob3RTrainer
+run_root: ???
+
+hydra:
+  run:
+    dir: ${run_root}/${glob3r.stage}
+  job_logging:
+    handlers:
+      file:
+        filename: ${hydra:runtime.output_dir}/train.log
+
+log:
+  output_dir: ${hydra:runtime.output_dir}
+  ckpt_dir: ${hydra:runtime.output_dir}/ckpts
 
 # Frozen Pi3 backbone and the Glob3R track-matching branch.
 model:

@@ -1,0 +1,16 @@
+defaults:
+  - glob3r_refinement
+  - _self_
+
+name: glob3r_joint
+
+glob3r:
+  stage: joint
+  matching_checkpoint: ${oc.env:MODEL_PATH}
+
+train:
+  num_epoch: 10
+  optimizer:
+    lr: 5.0e-5
+  lr_scheduler:
+    warmup_steps: 200

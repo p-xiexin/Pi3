@@ -7,6 +7,7 @@ name: glob3r_refinement
 # Only the paper-specified differences from the coarse experiment are kept here.
 glob3r:
   stage: refinement
+  matching_checkpoint: ${run_root}/coarse/ckpts/best_model/pytorch_model.bin
 
 train:
   image_num_range: [2, 24]
