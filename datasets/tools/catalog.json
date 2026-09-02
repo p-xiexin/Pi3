@@ -1,0 +1,650 @@
+{
+  "schema_version": 1,
+  "datasets": {
+    "waymo": {
+      "name": "Waymo Open Dataset Perception",
+      "homepage": "https://waymo.com/open/download/",
+      "license_url": "https://waymo.com/open/terms/",
+      "loader": "datasets.waymo_processed_dataset.WaymoPi3XDataset",
+      "verify": [
+        {"glob": "*/images/*.*", "min_count": 8},
+        {"glob": "*/lidars/*.npy", "min_count": 8},
+        {"glob": "*/intrinsics/*.txt", "min_count": 8},
+        {"glob": "*/extrinsics/*.txt", "min_count": 8},
+        {"glob": "*/ego_pose/*.txt", "min_count": 8}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "authorized-input",
+          "description": "Convert one official Perception TFRecord and retain up to 80 frames for loader and geometry tests.",
+          "download_bytes": 200000000,
+          "disk_bytes": 800000000,
+          "default_output": "data/waymo_processed",
+          "license_accept_required": true,
+          "prerequisites": ["Sign in on the Waymo download page and download one Perception v1 TFRecord.", "Pass the TFRecord path through --input."],
+          "recipe": {"type": "waymo", "one_record": true, "max_frames": 80},
+          "next_command": "python -m datasets.tools verify waymo"
+        },
+        "train": {
+          "mode": "authorized-input",
+          "description": "Convert every official Perception TFRecord in an authorized local directory.",
+          "download_bytes": 1100000000000,
+          "disk_bytes": 4000000000000,
+          "default_output": "data/waymo_processed_train",
+          "license_accept_required": true,
+          "prerequisites": ["Download the required Waymo training shards after accepting the Waymo license.", "Pass the directory containing TFRecords through --input."],
+          "recipe": {"type": "waymo"},
+          "next_command": "python -m datasets.tools verify waymo --profile train"
+        }
+      }
+    },
+    "scannet": {
+      "name": "ScanNet v2",
+      "homepage": "https://github.com/ScanNet/ScanNet",
+      "license_url": "https://kaldir.vc.in.tum.de/scannet/ScanNet_TOS.pdf",
+      "loader": "datasets.glob3r_scannet_dataset.Glob3RScannetValidationDataset",
+      "verify": [
+        {"glob": "*/color/*.*", "min_count": 8},
+        {"glob": "*/depth/*.png", "min_count": 8},
+        {"glob": "*/pose/*.txt", "min_count": 8},
+        {"glob": "*/intrinsic/*.txt", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "authorized-input",
+          "description": "Use one exported ScanNet scene with color, depth, pose, and intrinsic directories.",
+          "download_bytes": 300000000,
+          "disk_bytes": 1000000000,
+          "default_output": "data/scannet_minimal",
+          "license_accept_required": true,
+          "prerequisites": ["Request ScanNet access and use the official download-scannet.py script.", "Export one .sens scene with the official SensorData reader, then pass its parent directory through --input."],
+          "recipe": {"type": "authorized-input"},
+          "next_command": "python -m datasets.tools verify scannet"
+        },
+        "train": {
+          "mode": "authorized-input",
+          "description": "Validate a complete locally exported ScanNet v2 training root.",
+          "download_bytes": 1300000000000,
+          "disk_bytes": 2500000000000,
+          "default_output": "data/scannet",
+          "license_accept_required": true,
+          "prerequisites": ["Acquire ScanNet v2 with the official script after access approval.", "Export all selected .sens recordings before training and pass that root through --input."],
+          "recipe": {"type": "authorized-input"},
+          "next_command": "python -m datasets.tools verify scannet --profile train"
+        }
+      }
+    },
+    "tartanair": {
+      "name": "TartanAir v1",
+      "homepage": "https://tartanair.org/",
+      "license_url": "https://tartanair.org/terms.html",
+      "loader": "datasets.tartanair_dataset.TarTanAirDataset",
+      "verify": [
+        {"glob": "**/image_left/*.png", "min_count": 8},
+        {"glob": "**/depth_left/*.npy", "min_count": 8},
+        {"glob": "**/pose_left.txt", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "automatic",
+          "description": "Range-extract the first sixteen left RGB and depth frames plus poses from carwelding Hard P000.",
+          "download_bytes": 40000000,
+          "disk_bytes": 50000000,
+          "default_output": "data/tartanair_minimal",
+          "recipe": {
+            "type": "remote-zip",
+            "artifacts": [
+              {
+                "filename": "image_left.zip",
+                "url": "https://huggingface.co/datasets/theairlabcmu/tartanair/resolve/main/carwelding/Hard/image_left.zip",
+                "extract_to": "carwelding",
+                "entries": [
+                  "carwelding/Hard/P000/pose_left.txt",
+                  "carwelding/Hard/P000/image_left/000000_left.png",
+                  "carwelding/Hard/P000/image_left/000001_left.png",
+                  "carwelding/Hard/P000/image_left/000002_left.png",
+                  "carwelding/Hard/P000/image_left/000003_left.png",
+                  "carwelding/Hard/P000/image_left/000004_left.png",
+                  "carwelding/Hard/P000/image_left/000005_left.png",
+                  "carwelding/Hard/P000/image_left/000006_left.png",
+                  "carwelding/Hard/P000/image_left/000007_left.png",
+                  "carwelding/Hard/P000/image_left/000008_left.png",
+                  "carwelding/Hard/P000/image_left/000009_left.png",
+                  "carwelding/Hard/P000/image_left/000010_left.png",
+                  "carwelding/Hard/P000/image_left/000011_left.png",
+                  "carwelding/Hard/P000/image_left/000012_left.png",
+                  "carwelding/Hard/P000/image_left/000013_left.png",
+                  "carwelding/Hard/P000/image_left/000014_left.png",
+                  "carwelding/Hard/P000/image_left/000015_left.png"
+                ]
+              },
+              {
+                "filename": "depth_left.zip",
+                "url": "https://huggingface.co/datasets/theairlabcmu/tartanair/resolve/main/carwelding/Hard/depth_left.zip",
+                "extract_to": "carwelding",
+                "entries": [
+                  "carwelding/Hard/P000/depth_left/000000_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000001_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000002_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000003_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000004_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000005_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000006_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000007_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000008_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000009_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000010_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000011_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000012_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000013_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000014_left_depth.npy",
+                  "carwelding/Hard/P000/depth_left/000015_left_depth.npy"
+                ]
+              }
+            ]
+          },
+          "next_command": "python -m datasets.tools verify tartanair"
+        },
+        "train": {
+          "mode": "official-tool",
+          "description": "Use tartanair.get_all_data and tartanair.download for the selected full training modalities.",
+          "download_bytes": 20000000000000,
+          "disk_bytes": 30000000000000,
+          "default_output": "data/tartanair",
+          "prerequisites": ["Choose environments, cameras, and modalities explicitly because a literal all-data request is tens of terabytes.", "Pass the official tartanair root through --input after download."],
+          "recipe": {"type": "official-command"},
+          "next_command": "python -m datasets.tools verify tartanair --profile train"
+        }
+      }
+    },
+    "kitti": {
+      "name": "KITTI Raw and Depth Completion",
+      "homepage": "https://www.cvlibs.net/datasets/kitti/",
+      "license_url": "https://www.cvlibs.net/datasets/kitti/user_login.php",
+      "loader": "datasets.kitti_dataset.KITTIPi3XDataset",
+      "verify": [
+        {"glob": "**/image_02/data/*.png", "min_count": 8},
+        {"glob": "**/groundtruth/image_02/*.png", "min_count": 8},
+        {"glob": "**/calib_cam_to_cam.txt", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "authorized-input",
+          "description": "Use one synchronized raw drive plus the matching projected depth-completion frames.",
+          "download_bytes": 500000000,
+          "disk_bytes": 1500000000,
+          "default_output": "data",
+          "license_accept_required": true,
+          "prerequisites": ["Register and log in on the KITTI website.", "Place raw and depth roots under one parent and pass that parent through --input."],
+          "recipe": {"type": "authorized-input"},
+          "next_command": "python -m datasets.tools verify kitti"
+        },
+        "train": {
+          "mode": "authorized-input",
+          "description": "Use the complete KITTI raw image set and matching depth-completion training data.",
+          "download_bytes": 20000000000,
+          "disk_bytes": 50000000000,
+          "default_output": "data/kitti",
+          "license_accept_required": true,
+          "prerequisites": ["Download raw synchronized images, calibration, and the Depth Completion training archive while logged in.", "Pass their common parent through --input."],
+          "recipe": {"type": "authorized-input"},
+          "next_command": "python -m datasets.tools verify kitti --profile train"
+        }
+      }
+    },
+    "arkitscenes": {
+      "name": "ARKitScenes Raw RGB-D",
+      "homepage": "https://github.com/apple/ARKitScenes",
+      "license_url": "https://github.com/apple/ARKitScenes/blob/main/LICENSE",
+      "loader": "datasets.arkit_dataset.ARKitScenesPi3XDataset",
+      "verify": [
+        {"glob": "**/lowres_wide/*.png", "min_count": 8},
+        {"glob": "**/lowres_depth/*.png", "min_count": 8},
+        {"glob": "**/lowres_wide_intrinsics/*.pincam", "min_count": 8},
+        {"glob": "**/lowres_wide.traj", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "official-tool",
+          "description": "Download raw video 41069021 with only the four assets consumed by the loader.",
+          "download_bytes": 200000000,
+          "disk_bytes": 500000000,
+          "default_output": "data/arkitscenes_minimal/raw",
+          "prerequisites": ["Git must be available. The command uses Apple's official download_data.py."],
+          "recipe": {
+            "type": "official-command",
+            "commands": [
+              ["git", "clone", "https://github.com/apple/ARKitScenes.git", "{cache}/ARKitScenes"],
+              ["{python}", "{cache}/ARKitScenes/download_data.py", "raw", "--split", "Validation", "--video_id", "41069021", "--download_dir", "{output}", "--raw_dataset_assets", "lowres_depth", "lowres_wide.traj", "lowres_wide", "lowres_wide_intrinsics"]
+            ]
+          },
+          "next_command": "python -m datasets.tools verify arkitscenes"
+        },
+        "train": {
+          "mode": "official-tool",
+          "description": "Download every ARKitScenes raw training and validation capture with loader-required assets.",
+          "download_bytes": 700000000000,
+          "disk_bytes": 1200000000000,
+          "default_output": "data/arkitscenes/raw",
+          "prerequisites": ["Git must be available. Review Apple's license before starting the full download."],
+          "recipe": {
+            "type": "official-command",
+            "commands": [
+              ["git", "clone", "https://github.com/apple/ARKitScenes.git", "{cache}/ARKitScenes"],
+              ["{python}", "{cache}/ARKitScenes/download_data.py", "raw", "--video_id_csv", "{cache}/ARKitScenes/raw/raw_train_val_splits.csv", "--download_dir", "{output}", "--raw_dataset_assets", "lowres_depth", "lowres_wide.traj", "lowres_wide", "lowres_wide_intrinsics"]
+            ]
+          },
+          "next_command": "python -m datasets.tools verify arkitscenes --profile train"
+        }
+      }
+    },
+    "ase": {
+      "name": "Aria Synthetic Environments",
+      "homepage": "https://www.projectaria.com/datasets/ase/",
+      "license_url": "https://www.projectaria.com/datasets/ase/",
+      "loader": "datasets.ase_dataset.AriaSyntheticEnvironmentsPi3XDataset",
+      "verify": [
+        {"glob": "*/rgb/*.jpg", "min_count": 8},
+        {"glob": "*/depth/*.png", "min_count": 8},
+        {"glob": "*/trajectory.*", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "authorized-input",
+          "description": "Download scene 0 using a fresh ASE CDN metadata JSON obtained from Project Aria.",
+          "download_bytes": 150000000,
+          "disk_bytes": 300000000,
+          "default_output": "data/ASE",
+          "license_accept_required": true,
+          "prerequisites": ["Obtain a fresh aria_synthetic_environments_dataset_download_urls.json from the ASE page.", "Use the official aria_synthetic_environments_downloader for train scene 0, then pass the result through --input."],
+          "recipe": {"type": "authorized-input"},
+          "next_command": "python -m datasets.tools verify ase"
+        },
+        "train": {
+          "mode": "authorized-input",
+          "description": "Use the official ASE downloader with an explicit scene range for a dataset whose complete release is about 23 TB.",
+          "download_bytes": 23000000000000,
+          "disk_bytes": 30000000000000,
+          "default_output": "data/ASE_train",
+          "license_accept_required": true,
+          "prerequisites": ["Obtain a current CDN metadata JSON because signed links expire.", "Select scene ranges deliberately, run the official downloader, and pass its output root through --input."],
+          "recipe": {"type": "authorized-input"},
+          "next_command": "python -m datasets.tools verify ase --profile train"
+        }
+      }
+    },
+    "nuscenes": {
+      "name": "nuScenes",
+      "homepage": "https://www.nuscenes.org/nuscenes",
+      "license_url": "https://www.nuscenes.org/terms-of-use",
+      "loader": "datasets.nuscenes_dataset.NuScenesPi3XDataset",
+      "verify": [
+        {"glob": "v1.0-*/scene.json", "min_count": 1},
+        {"glob": "samples/CAM_FRONT/*.jpg", "min_count": 8},
+        {"glob": "samples/LIDAR_TOP/*.pcd.bin", "min_count": 8}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "automatic",
+          "description": "Download and extract the official ten-scene v1.0-mini release.",
+          "download_bytes": 4300000000,
+          "disk_bytes": 14000000000,
+          "default_output": "data/nuscenes_minimal",
+          "recipe": {"type": "archives", "artifacts": [{"filename": "v1.0-mini.tgz", "url": "https://www.nuscenes.org/data/v1.0-mini.tgz"}]},
+          "next_command": "python -m datasets.tools verify nuscenes"
+        },
+        "train": {
+          "mode": "authorized-input",
+          "description": "Use the complete official v1.0-trainval metadata, blobs, and maps.",
+          "download_bytes": 350000000000,
+          "disk_bytes": 700000000000,
+          "default_output": "data/nuscenes",
+          "license_accept_required": true,
+          "prerequisites": ["Create a nuScenes account and download every v1.0-trainval archive from the official page.", "Extract all archives into one root and pass that root through --input."],
+          "recipe": {"type": "authorized-input"},
+          "next_command": "python -m datasets.tools verify nuscenes --profile train"
+        }
+      }
+    },
+    "blendedmvs": {
+      "name": "BlendedMVS",
+      "homepage": "https://github.com/YoYo000/BlendedMVS",
+      "license_url": "https://github.com/YoYo000/BlendedMVS#license",
+      "loader": "datasets.blendmvs_dataset.BlendedMVSPi3XDataset",
+      "verify": [
+        {"glob": "*/blended_images/*.jpg", "min_count": 8},
+        {"glob": "*/cams/*_cam.txt", "min_count": 8},
+        {"glob": "*/rendered_depth_maps/*.pfm", "min_count": 8},
+        {"glob": "*/cams/pair.txt", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "automatic",
+          "description": "Range-extract eight matched views from one scene in the official split low-resolution release.",
+          "download_bytes": 600000000,
+          "disk_bytes": 1200000000,
+          "default_output": "data/blendedmvs_minimal",
+          "recipe": {
+            "type": "split-zip-sample",
+            "descriptor_filename": "BlendedMVS.zip",
+            "descriptor_url": "https://github.com/YoYo000/BlendedMVS/releases/download/v1.0.0/BlendedMVS.zip",
+            "base_url": "https://github.com/YoYo000/BlendedMVS/releases/download/v1.0.0",
+            "stem": "BlendedMVS",
+            "strip_components": 1,
+            "entries": [
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/cams/pair.txt",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/blended_images/00000000.jpg",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/cams/00000000_cam.txt",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/rendered_depth_maps/00000000.pfm",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/blended_images/00000002.jpg",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/cams/00000002_cam.txt",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/rendered_depth_maps/00000002.pfm",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/blended_images/00000003.jpg",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/cams/00000003_cam.txt",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/rendered_depth_maps/00000003.pfm",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/blended_images/00000070.jpg",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/cams/00000070_cam.txt",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/rendered_depth_maps/00000070.pfm",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/blended_images/00000079.jpg",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/cams/00000079_cam.txt",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/rendered_depth_maps/00000079.pfm",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/blended_images/00000290.jpg",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/cams/00000290_cam.txt",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/rendered_depth_maps/00000290.pfm",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/blended_images/00000291.jpg",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/cams/00000291_cam.txt",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/rendered_depth_maps/00000291.pfm",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/blended_images/00000294.jpg",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/cams/00000294_cam.txt",
+              "BlendedMVS/57f8d9bbe73f6760f10e916a/rendered_depth_maps/00000294.pfm"
+            ]
+          },
+          "next_command": "python -m datasets.tools verify blendedmvs"
+        },
+        "train": {
+          "mode": "official-tool",
+          "description": "Download and extract every volume in the official 27.5 GB split low-resolution release.",
+          "download_bytes": 29500000000,
+          "disk_bytes": 65000000000,
+          "default_output": "data/blendedmvs",
+          "prerequisites": ["Download BlendedMVS.z01 through BlendedMVS.z15 plus BlendedMVS.zip from the official v1.0.0 release.", "Extract the split archive with 7-Zip and pass the resulting root through --input."],
+          "recipe": {"type": "official-command"},
+          "next_command": "python -m datasets.tools verify blendedmvs --profile train"
+        }
+      }
+    },
+    "co3dv2": {
+      "name": "CO3Dv2",
+      "homepage": "https://github.com/facebookresearch/co3d",
+      "license_url": "https://github.com/facebookresearch/co3d/blob/main/LICENSE",
+      "loader": "datasets.co3dv2_dataset.CO3DV2Dataset",
+      "verify": [
+        {"glob": "*/frame_annotations.jgz", "min_count": 1},
+        {"glob": "*/sequence_annotations.jgz", "min_count": 1},
+        {"glob": "*/*/images/*.*", "min_count": 8},
+        {"glob": "*/*/depths/*.png", "min_count": 8}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "official-tool",
+          "description": "Download Meta's official single-sequence subset, about 8.9 GB, for realistic loader tests.",
+          "download_bytes": 8900000000,
+          "disk_bytes": 20000000000,
+          "default_output": "data/co3dv2_minimal",
+          "prerequisites": ["Git must be available. The official downloader resumes at archive granularity."],
+          "recipe": {"type": "official-command", "commands": [["git", "clone", "https://github.com/facebookresearch/co3d.git", "{cache}/co3d"], ["{python}", "{cache}/co3d/co3d/download_dataset.py", "--download_folder", "{output}", "--single_sequence_subset"]]},
+          "next_command": "python -m datasets.tools verify co3dv2"
+        },
+        "train": {
+          "mode": "official-tool",
+          "description": "Download the complete CO3Dv2 release with Meta's official downloader.",
+          "download_bytes": 5500000000000,
+          "disk_bytes": 10000000000000,
+          "default_output": "data/co3dv2",
+          "prerequisites": ["Reserve at least 10 TB including extracted data and archives.", "Prefer --download_categories in the upstream script when training does not need all categories."],
+          "recipe": {"type": "official-command", "commands": [["git", "clone", "https://github.com/facebookresearch/co3d.git", "{cache}/co3d"], ["{python}", "{cache}/co3d/co3d/download_dataset.py", "--download_folder", "{output}"]]},
+          "next_command": "python -m datasets.tools verify co3dv2 --profile train"
+        }
+      }
+    },
+    "tum_rgbd": {
+      "name": "TUM RGB-D",
+      "homepage": "https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download",
+      "license_url": "https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download",
+      "loader": "datasets.tum_rgbd_dataset.TUMRGBDPi3XDataset",
+      "verify": [
+        {"glob": "*/rgb/*.png", "min_count": 8},
+        {"glob": "*/depth/*.png", "min_count": 8},
+        {"glob": "*/rgb.txt", "min_count": 1},
+        {"glob": "*/depth.txt", "min_count": 1},
+        {"glob": "*/groundtruth.txt", "min_count": 1},
+        {"glob": "pi3_index.npy", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "automatic",
+          "description": "Download the official freiburg1_desk RGB-D sequence with ground-truth trajectory.",
+          "download_bytes": 344000000,
+          "disk_bytes": 1100000000,
+          "default_output": "data/tum_rgbd_minimal",
+          "recipe": {"type": "archives", "artifacts": [{"filename": "rgbd_dataset_freiburg1_desk.tgz", "url": "https://cvg.cit.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_desk.tgz"}]},
+          "postprocess": [["{python}", "-m", "datasets.tools.build_index", "tum_rgbd", "{output}"], ["{python}", "-m", "datasets.tools.build_index", "tum_rgbd", "{output}", "--output", "{repo}/data/dataset_cache/tum_rgbd_minimal.npy"]],
+          "next_command": "python -m datasets.tools verify tum_rgbd"
+        },
+        "train": {
+          "mode": "official-tool",
+          "description": "Build a training root from the chosen official TUM RGB-D sequences because the project publishes per-sequence archives.",
+          "download_bytes": 50000000000,
+          "disk_bytes": 100000000000,
+          "default_output": "data/tum_rgbd",
+          "prerequisites": ["Choose sequences on the official download page according to the training split used by the experiment.", "Extract every sequence under one root and pass it through --input."],
+          "recipe": {"type": "official-command"},
+          "postprocess": [["{python}", "-m", "datasets.tools.build_index", "tum_rgbd", "{output}"]],
+          "next_command": "python -m datasets.tools verify tum_rgbd --profile train"
+        }
+      }
+    },
+    "redwood": {
+      "name": "Redwood RGB-D",
+      "homepage": "http://redwood-data.org/indoor/dataset.html",
+      "license_url": "http://redwood-data.org/indoor/terms.html",
+      "loader": "datasets.redwood_rgbd_dataset.RedwoodRGBDDataset",
+      "verify": [
+        {"glob": "**/color/*.jpg", "min_count": 5},
+        {"glob": "**/depth/*.png", "min_count": 5},
+        {"glob": "**/camera_primesense.json", "min_count": 1},
+        {"glob": "**/trajectory.log", "min_count": 1},
+        {"glob": "pi3_index.npy", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "automatic",
+          "description": "Download Open3D's official five-frame Redwood RGB-D sample.",
+          "download_bytes": 3800000,
+          "disk_bytes": 15000000,
+          "default_output": "data/redwood_minimal",
+          "recipe": {"type": "archives", "artifacts": [{"filename": "SampleRedwoodRGBDImages.zip", "url": "https://github.com/isl-org/open3d_downloads/releases/download/20220201-data/SampleRedwoodRGBDImages.zip", "extract_to": "sample"}]},
+          "postprocess": [["{python}", "-m", "datasets.tools.build_index", "redwood", "{output}"], ["{python}", "-m", "datasets.tools.build_index", "redwood", "{output}", "--output", "{repo}/data/dataset_cache/redwood_minimal.npy"]],
+          "next_command": "python -m datasets.tools verify redwood"
+        },
+        "train": {
+          "mode": "authorized-input",
+          "description": "Use a complete Redwood RGB-D scene downloaded from the project site and arranged as color, depth, intrinsics, and trajectory.",
+          "download_bytes": 100000000000,
+          "disk_bytes": 200000000000,
+          "default_output": "data/redwood",
+          "prerequisites": ["Select and download full scenes from the Redwood project page.", "Pass the extracted loader-facing root through --input."],
+          "recipe": {"type": "authorized-input"},
+          "postprocess": [["{python}", "-m", "datasets.tools.build_index", "redwood", "{output}"]],
+          "next_command": "python -m datasets.tools verify redwood --profile train"
+        }
+      }
+    },
+    "eth3d_slam": {
+      "name": "ETH3D SLAM",
+      "homepage": "https://www.eth3d.net/slam_datasets",
+      "license_url": "https://www.eth3d.net/terms",
+      "loader": "datasets.eth3d_slam_dataset.ETH3DSLAMDataset",
+      "verify": [
+        {"glob": "**/rgb/*.png", "min_count": 8},
+        {"glob": "**/depth/*.png", "min_count": 8},
+        {"glob": "**/calibration.txt", "min_count": 1},
+        {"glob": "**/groundtruth.txt", "min_count": 1},
+        {"glob": "pi3_index.npy", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "automatic",
+          "description": "Download plant_1 monocular RGB, poses, calibration, and registered RGB-D data.",
+          "download_bytes": 33000000,
+          "disk_bytes": 120000000,
+          "default_output": "data/eth3d_slam_minimal",
+          "recipe": {"type": "archives", "artifacts": [{"filename": "plant_1_mono.zip", "url": "https://www.eth3d.net/data/slam/datasets/plant_1_mono.zip", "extract_to": "plant_1"}, {"filename": "plant_1_rgbd.zip", "url": "https://www.eth3d.net/data/slam/datasets/plant_1_rgbd.zip", "extract_to": "plant_1"}]},
+          "postprocess": [["{python}", "-m", "datasets.tools.build_index", "eth3d_slam", "{output}"], ["{python}", "-m", "datasets.tools.build_index", "eth3d_slam", "{output}", "--output", "{repo}/data/dataset_cache/eth3d_slam_minimal.npy"]],
+          "next_command": "python -m datasets.tools verify eth3d_slam"
+        },
+        "train": {
+          "mode": "official-tool",
+          "description": "Use ETH3D's official SLAM downloader to select all mono and RGB-D sequence components needed for training.",
+          "download_bytes": 500000000000,
+          "disk_bytes": 1000000000000,
+          "default_output": "data/eth3d_slam",
+          "prerequisites": ["Run the official download_eth3d_slam_datasets.py script and select mono plus rgbd data.", "Pass the extracted root through --input."],
+          "recipe": {"type": "official-command"},
+          "postprocess": [["{python}", "-m", "datasets.tools.build_index", "eth3d_slam", "{output}"]],
+          "next_command": "python -m datasets.tools verify eth3d_slam --profile train"
+        }
+      }
+    },
+    "hypersim": {
+      "name": "Hypersim",
+      "homepage": "https://github.com/apple/ml-hypersim",
+      "license_url": "https://creativecommons.org/licenses/by-sa/3.0/",
+      "loader": "datasets.hypersim_dataset.HypersimDataset",
+      "verify": [
+        {"glob": "ai_*_*/images/scene_cam_*_final_preview/frame.*.tonemap.jpg", "min_count": 8},
+        {"glob": "ai_*_*/images/scene_cam_*_geometry_hdf5/frame.*.depth_meters.hdf5", "min_count": 8},
+        {"glob": "ai_*_*/_detail/cam_*/camera_keyframe_positions.hdf5", "min_count": 1},
+        {"glob": "ai_*_*/_detail/cam_*/camera_keyframe_orientations.hdf5", "min_count": 1},
+        {"glob": "metadata_camera_parameters.csv", "min_count": 1},
+        {"glob": "pi3_index.npy", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "automatic",
+          "description": "Range-extract eight tonemapped RGB frames, metric depth maps, and camera metadata from ai_001_001 cam_00.",
+          "download_bytes": 10000000,
+          "disk_bytes": 15000000,
+          "default_output": "data/hypersim_minimal",
+          "recipe": {
+            "type": "remote-zip",
+            "files": [
+              {
+                "filename": "metadata_camera_parameters.csv",
+                "url": "https://raw.githubusercontent.com/apple/ml-hypersim/main/contrib/mikeroberts3000/metadata_camera_parameters.csv"
+              }
+            ],
+            "artifacts": [
+              {
+                "filename": "ai_001_001.zip",
+                "url": "https://docs-assets.developer.apple.com/ml-research/datasets/hypersim/v1/scenes/ai_001_001.zip",
+                "entries": [
+                  "ai_001_001/_detail/metadata_scene.csv",
+                  "ai_001_001/_detail/cam_00/metadata_camera.csv",
+                  "ai_001_001/_detail/cam_00/camera_keyframe_frame_indices.hdf5",
+                  "ai_001_001/_detail/cam_00/camera_keyframe_positions.hdf5",
+                  "ai_001_001/_detail/cam_00/camera_keyframe_orientations.hdf5",
+                  "ai_001_001/images/scene_cam_00_final_preview/frame.0000.tonemap.jpg",
+                  "ai_001_001/images/scene_cam_00_final_preview/frame.0001.tonemap.jpg",
+                  "ai_001_001/images/scene_cam_00_final_preview/frame.0002.tonemap.jpg",
+                  "ai_001_001/images/scene_cam_00_final_preview/frame.0003.tonemap.jpg",
+                  "ai_001_001/images/scene_cam_00_final_preview/frame.0004.tonemap.jpg",
+                  "ai_001_001/images/scene_cam_00_final_preview/frame.0005.tonemap.jpg",
+                  "ai_001_001/images/scene_cam_00_final_preview/frame.0006.tonemap.jpg",
+                  "ai_001_001/images/scene_cam_00_final_preview/frame.0007.tonemap.jpg",
+                  "ai_001_001/images/scene_cam_00_geometry_hdf5/frame.0000.depth_meters.hdf5",
+                  "ai_001_001/images/scene_cam_00_geometry_hdf5/frame.0001.depth_meters.hdf5",
+                  "ai_001_001/images/scene_cam_00_geometry_hdf5/frame.0002.depth_meters.hdf5",
+                  "ai_001_001/images/scene_cam_00_geometry_hdf5/frame.0003.depth_meters.hdf5",
+                  "ai_001_001/images/scene_cam_00_geometry_hdf5/frame.0004.depth_meters.hdf5",
+                  "ai_001_001/images/scene_cam_00_geometry_hdf5/frame.0005.depth_meters.hdf5",
+                  "ai_001_001/images/scene_cam_00_geometry_hdf5/frame.0006.depth_meters.hdf5",
+                  "ai_001_001/images/scene_cam_00_geometry_hdf5/frame.0007.depth_meters.hdf5"
+                ]
+              }
+            ]
+          },
+          "postprocess": [["{python}", "-m", "datasets.tools.build_index", "hypersim", "{output}"], ["{python}", "-m", "datasets.tools.build_index", "hypersim", "{output}", "--output", "{repo}/data/dataset_cache/hypersim_minimal.npy"]],
+          "next_command": "python -m datasets.tools verify hypersim"
+        },
+        "train": {
+          "mode": "official-tool",
+          "description": "Download the complete official Hypersim image release with Apple's cross-platform selective downloader.",
+          "download_bytes": 1900000000000,
+          "disk_bytes": 2500000000000,
+          "default_output": "data/hypersim",
+          "license_accept_required": true,
+          "prerequisites": [
+            "Review the CC BY-SA 3.0 license and reserve at least 2.5 TB of free disk space.",
+            "Git must be available to cache Apple's official ml-hypersim repository."
+          ],
+          "recipe": {
+            "type": "official-command",
+            "files": [
+              {
+                "filename": "metadata_camera_parameters.csv",
+                "url": "https://raw.githubusercontent.com/apple/ml-hypersim/main/contrib/mikeroberts3000/metadata_camera_parameters.csv"
+              }
+            ],
+            "commands": [
+              ["git", "clone", "https://github.com/apple/ml-hypersim.git", "{cache}/ml-hypersim"],
+              ["{python}", "{cache}/ml-hypersim/contrib/99991/download.py", "--directory", "{output}", "--silent"]
+            ]
+          },
+          "postprocess": [["{python}", "-m", "datasets.tools.build_index", "hypersim", "{output}"]],
+          "next_command": "python -m datasets.tools verify hypersim --profile train"
+        }
+      }
+    },
+    "sintel": {
+      "name": "MPI Sintel Depth",
+      "homepage": "https://sintel.is.tue.mpg.de/depth",
+      "license_url": "https://sintel.is.tue.mpg.de/",
+      "loader": "datasets.sintel_dataset.SintelDepthDataset",
+      "verify": [
+        {"glob": "training/final/*/*.png", "min_count": 8},
+        {"glob": "training/depth/*/*.dpt", "min_count": 8},
+        {"glob": "training/camdata_left/*/*.cam", "min_count": 8},
+        {"glob": "pi3_index.npy", "min_count": 1}
+      ],
+      "profiles": {
+        "minimal": {
+          "mode": "automatic",
+          "description": "Range-extract the first eight alley_1 images, metric depth maps, and corrected camera files without downloading both full archives.",
+          "download_bytes": 20000000,
+          "disk_bytes": 30000000,
+          "default_output": "data/sintel_minimal/sample",
+          "recipe": {
+            "type": "remote-zip",
+            "artifacts": [
+              {"filename": "MPI-Sintel-training_images.zip", "url": "https://files.is.tue.mpg.de/sintel/MPI-Sintel-training_images.zip", "entries": ["training/final/alley_1/frame_0001.png", "training/final/alley_1/frame_0002.png", "training/final/alley_1/frame_0003.png", "training/final/alley_1/frame_0004.png", "training/final/alley_1/frame_0005.png", "training/final/alley_1/frame_0006.png", "training/final/alley_1/frame_0007.png", "training/final/alley_1/frame_0008.png"]},
+              {"filename": "MPI-Sintel-depth-training-20150305.zip", "url": "https://files.is.tue.mpg.de/jwulff/sintel/MPI-Sintel-depth-training-20150305.zip", "entries": ["training/depth/alley_1/frame_0001.dpt", "training/depth/alley_1/frame_0002.dpt", "training/depth/alley_1/frame_0003.dpt", "training/depth/alley_1/frame_0004.dpt", "training/depth/alley_1/frame_0005.dpt", "training/depth/alley_1/frame_0006.dpt", "training/depth/alley_1/frame_0007.dpt", "training/depth/alley_1/frame_0008.dpt", "training/camdata_left/alley_1/frame_0001.cam", "training/camdata_left/alley_1/frame_0002.cam", "training/camdata_left/alley_1/frame_0003.cam", "training/camdata_left/alley_1/frame_0004.cam", "training/camdata_left/alley_1/frame_0005.cam", "training/camdata_left/alley_1/frame_0006.cam", "training/camdata_left/alley_1/frame_0007.cam", "training/camdata_left/alley_1/frame_0008.cam"]}
+            ]
+          },
+          "postprocess": [["{python}", "-m", "datasets.tools.build_index", "sintel", "{output}"], ["{python}", "-m", "datasets.tools.build_index", "sintel", "{output}", "--output", "{repo}/data/dataset_cache/sintel_minimal.npy"]],
+          "next_command": "python -m datasets.tools verify sintel"
+        },
+        "train": {
+          "mode": "automatic",
+          "description": "Download and extract the complete official training images plus corrected depth and camera archive.",
+          "download_bytes": 10500000000,
+          "disk_bytes": 18000000000,
+          "default_output": "data/sintel",
+          "recipe": {"type": "archives", "artifacts": [{"filename": "MPI-Sintel-training_images.zip", "url": "https://files.is.tue.mpg.de/sintel/MPI-Sintel-training_images.zip"}, {"filename": "MPI-Sintel-depth-training-20150305.zip", "url": "https://files.is.tue.mpg.de/jwulff/sintel/MPI-Sintel-depth-training-20150305.zip"}]},
+          "postprocess": [["{python}", "-m", "datasets.tools.build_index", "sintel", "{output}"]],
+          "next_command": "python -m datasets.tools verify sintel --profile train"
+        }
+      }
+    }
+  }
+}

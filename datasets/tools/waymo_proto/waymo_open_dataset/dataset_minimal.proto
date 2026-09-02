@@ -1,0 +1,103 @@
+// Minimal wire-compatible subset of the Waymo Open Dataset perception proto.
+// Field numbers and types follow Waymo Open Dataset v1.4.3. Unknown fields in
+// a full Frame message are intentionally preserved or skipped by protobuf.
+syntax = "proto2";
+
+package waymo.open_dataset;
+
+message MatrixShape {
+  repeated int32 dims = 1;
+}
+
+message MatrixFloat {
+  repeated float data = 1 [packed = true];
+  optional MatrixShape shape = 2;
+}
+
+message Transform {
+  repeated double transform = 1;
+}
+
+message CameraName {
+  enum Name {
+    UNKNOWN = 0;
+    FRONT = 1;
+    FRONT_LEFT = 2;
+    FRONT_RIGHT = 3;
+    SIDE_LEFT = 4;
+    SIDE_RIGHT = 5;
+  }
+}
+
+message LaserName {
+  enum Name {
+    UNKNOWN = 0;
+    TOP = 1;
+    FRONT = 2;
+    SIDE_LEFT = 3;
+    SIDE_RIGHT = 4;
+    REAR = 5;
+  }
+}
+
+message Velocity {
+  optional float v_x = 1;
+  optional float v_y = 2;
+  optional float v_z = 3;
+  optional double w_x = 4;
+  optional double w_y = 5;
+  optional double w_z = 6;
+}
+
+message CameraCalibration {
+  optional CameraName.Name name = 1;
+  repeated double intrinsic = 2;
+  optional Transform extrinsic = 3;
+  optional int32 width = 4;
+  optional int32 height = 5;
+}
+
+message LaserCalibration {
+  optional LaserName.Name name = 1;
+  repeated double beam_inclinations = 2;
+  optional double beam_inclination_min = 3;
+  optional double beam_inclination_max = 4;
+  optional Transform extrinsic = 5;
+}
+
+message Context {
+  optional string name = 1;
+  repeated CameraCalibration camera_calibrations = 2;
+  repeated LaserCalibration laser_calibrations = 3;
+}
+
+message RangeImage {
+  optional bytes range_image_compressed = 2;
+  optional bytes camera_projection_compressed = 3;
+  optional bytes range_image_pose_compressed = 4;
+}
+
+message CameraImage {
+  optional CameraName.Name name = 1;
+  optional bytes image = 2;
+  optional Transform pose = 3;
+  optional Velocity velocity = 4;
+  optional double pose_timestamp = 5;
+  optional double shutter = 6;
+  optional double camera_trigger_time = 7;
+  optional double camera_readout_done_time = 8;
+}
+
+message Laser {
+  optional LaserName.Name name = 1;
+  optional RangeImage ri_return1 = 2;
+  optional RangeImage ri_return2 = 3;
+}
+
+message Frame {
+  optional Context context = 1;
+  optional int64 timestamp_micros = 2;
+  optional Transform pose = 3;
+  repeated CameraImage images = 4;
+  repeated Laser lasers = 5;
+}
