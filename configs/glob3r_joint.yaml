@@ -6,7 +6,6 @@ name: glob3r_joint
 
 glob3r:
   stage: joint
-  matching_checkpoint: ${oc.env:MODEL_PATH}
 
 train:
   num_epoch: 10

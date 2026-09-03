@@ -37,12 +37,16 @@ export OMP_NUM_THREADS=4
 
 STAGE=${STAGE:-coarse}
 RUN_DIR=${RUN_DIR:-${PROJECT_ROOT}/outputs/glob3r_${SLURM_JOB_ID}}
+MODEL_ARGS=()
 
 if [ "${STAGE}" = "coarse" ]; then
     sbatch \
         --dependency=afterok:${SLURM_JOB_ID} \
         --export=ALL,STAGE=refinement,RUN_DIR=${RUN_DIR} \
         train.sh
+elif [ "${STAGE}" = "joint" ]; then
+    : "${MODEL_PATH:?MODEL_PATH is required for joint training}"
+    MODEL_ARGS+=(glob3r.matching_checkpoint="${MODEL_PATH}")
 fi
 
 accelerate launch \
@@ -50,4 +54,5 @@ accelerate launch \
     --num_processes 8 \
     scripts/train_glob3r.py \
     --config-name "glob3r_${STAGE}" \
-    run_root="${RUN_DIR}"
+    run_root="${RUN_DIR}" \
+    "${MODEL_ARGS[@]}"

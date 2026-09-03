@@ -227,7 +227,11 @@ class DPTMatchingHead(nn.Module):
             fused = F.interpolate(fused, size=pyramid[level].shape[-2:], mode="bilinear", align_corners=True)
             fused = self.fusion[level](fused + pyramid[level])
         pair_map = F.interpolate(pair_map, size=target_sizes[0], mode="bilinear", align_corners=True)
-        prediction = self.output(fused + pair_map)
+        # Keep the prediction heads in FP32, as done by Pi3 and RoMaV2.  In
+        # particular, confidence logits must not saturate through a BF16
+        # sigmoid before the numerically stable BCE-with-logits objective.
+        with torch.autocast(device_type=fused.device.type, enabled=False):
+            prediction = self.output((fused + pair_map).float())
 
         # Glob3R Eq. (20): (W^(a->B), p^(a->B)) = DPT_match(F^(a->B), E).
         raw_warp, confidence_logits = prediction[:, :2], prediction[:, 2:3]
@@ -347,7 +351,9 @@ class DepthwiseRefinementBlock(nn.Module):
         self.output = nn.Conv2d(input_channels, 3, 1)
 
     def forward(self, feature: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        update = self.output(self.body(feature))
+        hidden = self.body(feature)
+        with torch.autocast(device_type=hidden.device.type, enabled=False):
+            update = self.output(hidden.float())
         # Glob3R Eq. (24): (Delta W_s, Delta p_s) = Refine_s(F_s).
         return update[:, :2], update[:, 2:3]
 
@@ -401,7 +407,7 @@ class WarpRefinement(nn.Module):
         reference_index: int,
         image_height: int,
         image_width: int,
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
         # B: batch, T: target views, N: all views, C_s/H_s/W_s: features at stride s.
         # coarse_warp: [B,T,2,H/4,W/4] -> [B*T,2,H/4,W/4], treating each
         # reference-target pair as an independent sample for 2D refinement.
@@ -414,7 +420,7 @@ class WarpRefinement(nn.Module):
         confidence_logits = coarse_confidence_logits.reshape(
             batch * targets, 1, *coarse_confidence_logits.shape[-2:]
         )
-        warp_stages, confidence_stages = [], []
+        warp_stages, confidence_stages, confidence_logits_stages = [], [], []
 
         for stride in (4, 2, 1):
             # RoMaV2 decouples stages by stopping gradients through the previous estimate.
@@ -488,10 +494,12 @@ class WarpRefinement(nn.Module):
             pixel_warp = self._pixel_warp(warp, image_height, image_width)
             # Restore the target-view axis for public outputs at each stride.
             warp_stages.append(pixel_warp.reshape(batch, targets, 2, feature_height, feature_width))
-            confidence_stages.append(
-                confidence_logits.sigmoid().reshape(batch, targets, 1, feature_height, feature_width)
+            stage_logits = confidence_logits.reshape(
+                batch, targets, 1, feature_height, feature_width
             )
-        return warp_stages, confidence_stages
+            confidence_logits_stages.append(stage_logits)
+            confidence_stages.append(stage_logits.sigmoid())
+        return warp_stages, confidence_stages, confidence_logits_stages
 
 
 @dataclass
@@ -499,8 +507,10 @@ class MatchingOutput:
     similarity: torch.Tensor  # Row-wise cos/tau logits, not exponentiated affinities.
     coarse_warp: torch.Tensor
     coarse_confidence: torch.Tensor
+    coarse_confidence_logits: torch.Tensor
     warp_stages: List[torch.Tensor]
     confidence_stages: List[torch.Tensor]
+    confidence_logits_stages: List[torch.Tensor]
     target_indices: List[int]
 
 
@@ -564,9 +574,10 @@ class Glob3RMatchingHead(nn.Module):
         )
         warp_stages: List[torch.Tensor] = []
         confidence_stages: List[torch.Tensor] = []
+        confidence_logits_stages: List[torch.Tensor] = []
         if self.refinement_active:
             fine_features = self.fine_features(images)
-            warp_stages, confidence_stages = self.refinement(
+            warp_stages, confidence_stages, confidence_logits_stages = self.refinement(
                 coarse_warp,
                 coarse_confidence_logits,
                 fine_features,
@@ -577,12 +588,14 @@ class Glob3RMatchingHead(nn.Module):
             )
         # Glob3R Eq. (2): W_(a->B),p_(a->B) = DPT_match(Dec_match(H),a).
         return MatchingOutput(
-            similarity,
-            coarse_warp,
-            coarse_confidence,
-            warp_stages,
-            confidence_stages,
-            target_indices,
+            similarity=similarity,
+            coarse_warp=coarse_warp,
+            coarse_confidence=coarse_confidence,
+            coarse_confidence_logits=coarse_confidence_logits,
+            warp_stages=warp_stages,
+            confidence_stages=confidence_stages,
+            confidence_logits_stages=confidence_logits_stages,
+            target_indices=target_indices,
         )
 
 
