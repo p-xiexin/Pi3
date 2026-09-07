@@ -1,0 +1,198 @@
+name: abot_recon_stage1
+work_dir: ${hydra:runtime.cwd}
+working_dir: ${work_dir}
+random_seed: 1111
+
+model:
+  _target_: pi3.models.abot_recon.model.ABotRecon
+  pos_type: rope100
+  decoder_size: large
+  load_vggt: false
+  freeze_encoder: false
+  enable_confidence: false
+  confidence_only_train: false
+  enable_rotation_refiner: false
+  local_window_frames: 12
+  num_dec_blk_not_to_checkpoint: 4
+  point_z_log_max: 10.0
+  global_pos_encoding: rope3d
+  rope3d_fhw_dim: [20, 22, 22]
+  max_frames: 4096
+  gate_layers: null
+  ckpt: ???
+
+loss:
+  train_loss:
+    _target_: pi3.models.abot_recon.loss.ABotReconLoss
+    point_weight: 1.0
+    normal_weight: 1.0
+    pose_weight: 0.1
+    smooth_weight: 0.1
+    confidence_weight: 0.0
+    translation_weight: 100.0
+    rotation_weight: 1.0
+    max_pair_gap: 12
+    gap_gamma: 0.5
+    smooth_temporal_weight: 1.0
+    confidence_error_threshold: 0.02
+    huber_delta: 0.1
+    local_align_res: 4096
+  test_loss:
+    ${loss.train_loss}
+
+train:
+  image_num_range: [32, 32]
+  max_img_per_gpu: 32
+  resolution: [[504, 280]]
+  random_reslution: false
+  num_resolution: 1
+  num_workers: 16
+  batch_size: 1
+  num_epoch: 32
+  iters_per_epoch: 1000
+  print_freq: 40
+  base_seed: 666
+  model_dtype: bf16
+  dynamo_backend: NO
+  dynamic_compile: false
+  gradient_accumulation_steps: 1
+  clip_grad: 1.0
+  clip_loss: 10
+  seed: 42
+  resume: null
+  auto_resume: true
+  start_epoch: 0
+  global_step: 0
+  world_size: 1
+  rank: -1
+  gpu: -1
+  dist_on_itp: false
+  find_unused_parameters: false
+  distributed: false
+  dist_url: env://
+  dist_backend: nccl
+  optimizer:
+    type: AdamW
+    lr: 1e-4
+    encoder_lr: 1e-4
+    refiner_lr: 1e-4
+    weight_decay: 5e-2
+    betas: [0.9, 0.95]
+    verbose: true
+    filter_bias_and_bn: true
+  lr_scheduler:
+    type: OneCycleLR
+    max_lr: ${train.optimizer.lr}
+    pct_start: 0.0
+    anneal_strategy: cos
+    div_factor: 1.0
+    final_div_factor: 100.0
+    total_steps: -1
+
+test:
+  image_num_range: [8, 8]
+  max_img_per_gpu: 32
+  num_workers: 8
+  batch_size: 1
+  print_freq: 10
+  iters_per_test: -1
+
+train_dataset:
+  length: 10000000
+  weights:
+    KITTIABotRecon: 100000
+  KITTIABotRecon:
+    _target_: pi3.models.abot_recon.kitti_dataset.KITTIABotReconDataset
+    raw_root: ???
+    depth_root: ???
+    index_file: null
+    cameras: [image_02]
+    splits: [train]
+    frame_step: 1
+    splat_radius: 0
+    z_far: 80
+    frame_num: 32
+    shuffle: false
+    aug_crop: 0
+    aug_focal: 0.9
+    transform:
+      _partial_: true
+      _target_: datasets.base.transforms.JitterJpegLossBlurring
+    mode: train
+
+train_dataloader:
+  drop_last: true
+  shuffle: true
+
+test_dataset:
+  weights:
+    KITTIABotRecon: 2000
+  KITTIABotRecon:
+    _target_: pi3.models.abot_recon.kitti_dataset.KITTIABotReconDataset
+    raw_root: ${train_dataset.KITTIABotRecon.raw_root}
+    depth_root: ${train_dataset.KITTIABotRecon.depth_root}
+    index_file: ${train_dataset.KITTIABotRecon.index_file}
+    cameras: [image_02]
+    splits: [val]
+    frame_step: 1
+    splat_radius: 0
+    z_far: 80
+    frame_num: 8
+    shuffle: false
+    aug_crop: 0
+    aug_focal: 1.0
+    resolution: [[504, 280]]
+    transform:
+      _partial_: true
+      _target_: datasets.base.transforms.ImgToTensor
+    mode: test
+
+test_dataloader:
+  drop_last: false
+  shuffle: false
+
+abot_recon:
+  visualization:
+    enabled: true
+    interval_steps: 500
+    num_samples: 1
+    num_frames: 8
+    cell_width: 160
+    relative_error_max: 0.2
+    trajectory_width: 960
+    trajectory_height: 520
+    trajectory_num_frames: 0
+    trajectory_columns: 8
+    trajectory_camera_scale: 0.08
+
+data_viz:
+  output_dir: ${work_dir}/outputs/abot_recon_dataset_viz
+  sample_index: 0
+  num_samples: 1
+  frame_num: 8
+  cell_width: 240
+  max_frames: 8
+  show: false
+
+log:
+  output_dir: ${work_dir}/outputs/${name}
+  use_tensorboard: true
+  use_wandb: false
+  wandb_init_conf:
+    name: ${name}
+    entity: null
+    project: ${name}
+  summary_interval: 1
+  ckpt_interval: 10
+  max_checkpoints: 3
+  ckpt_dir: ${log.output_dir}/ckpts
+
+hydra:
+  run:
+    dir: ${log.output_dir}
+  job:
+    chdir: false
+  job_logging:
+    handlers:
+      file:
+        filename: ${log.output_dir}/train.log
