@@ -1,0 +1,53 @@
+defaults:
+  - stage1
+  - _self_
+
+name: abot_recon_stage2
+
+model:
+  # Load the complete ABot-Recon Stage I model with a fresh Stage II optimizer.
+  load_pi3: null
+  ckpt: ???
+  freeze_encoder: True
+  enable_confidence: false
+  confidence_only_train: false
+  enable_rotation_refiner: true
+  num_dec_blk_not_to_checkpoint: 0
+  adj_pose_head_to_ckpt: true
+  local_window_frames: 12
+
+train:
+  image_num_range: [128, 128]
+  max_img_per_gpu: 128
+  batch_size: 1
+  num_epoch: 38
+  iters_per_epoch: 1000
+  model_dtype: bf16
+  use_ema: true
+  ema_decay: 0.999
+  gradient_accumulation_steps: 4
+  clip_grad: 1.0
+  resume: null
+  optimizer:
+    lr: 2e-5
+    encoder_lr: 2e-5
+    refiner_lr: 5e-5
+  lr_scheduler:
+    # The custom OneCycleLR caps every parameter group at this value, retaining
+    # 2e-5 for the base groups and 5e-5 for the refiner groups.
+    max_lr: 5e-5
+
+test:
+  image_num_range: [128, 128]
+  max_img_per_gpu: 128
+  # Keep long-horizon validation bounded while evaluating complete 128-frame clips.
+  iters_per_test: 8
+
+train_dataset:
+  KITTIABotRecon:
+    min_sequence_frames: 128
+
+test_dataset:
+  KITTIABotRecon:
+    frame_num: 128
+    min_sequence_frames: 128

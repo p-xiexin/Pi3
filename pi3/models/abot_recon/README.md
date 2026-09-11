@@ -29,21 +29,42 @@ pip install -r pi3/models/abot_recon/requirements.txt
 ```
 
 ```powershell
-python -m pi3.models.abot_recon.train model.ckpt=path/to/pi3.pth train_dataset.KITTIABotRecon.raw_root=path/to/kitti_raw train_dataset.KITTIABotRecon.depth_root=path/to/kitti_depth
+python -m pi3.models.abot_recon.train model.load_pi3=path/to/pi3.pth train_dataset.KITTIABotRecon.raw_root=path/to/kitti_raw train_dataset.KITTIABotRecon.depth_root=path/to/kitti_depth
 ```
 
 The package-local `train_slurm.sh` follows the repository's single-node,
 eight-GPU Accelerate launch.  All model and dataset settings come from
 `stage1.yaml`.
 
-`viz.py` writes two TensorBoard diagnostics every 500 optimizer
-steps by default.  `abot_reconstruction` compares RGB, aligned predicted depth,
-ground-truth depth, relative point error, confidence and the validity mask on
-uniformly sampled frames.  `abot_trajectory` renders every streaming time step
-in 3D.  Each panel contains the complete dashed GT path, the solid predicted
-prefix available at that step, and separate GT and predicted camera frustums.
-Validation records the first batch once per epoch.  The interval, frame count
-and panel sizes live under `abot_recon.visualization` in `stage1.yaml`.
+Set `train.use_ema=true` to maintain the report's 0.999 EMA through training.  EMA
+updates after every optimizer step and is used for validation.  Accelerate
+stores it as `custom_checkpoint_0.pkl` beside the raw model and optimizer
+states, so interrupted runs restore both versions.  Point the next stage's
+`model.ckpt` at this custom checkpoint to initialize from EMA weights.  Keep
+EMA disabled when resuming an older checkpoint that does not contain this
+file.
+
+`dataset.py` contains thin ABot-Recon adapters for the existing KITTI,
+TartanAir, ScanNet, Waymo and BlendedMVS loaders.  The adapters reuse all parent
+dataset IO and geometry code, disable view shuffling and attach a stable stream
+order.  The inactive dataset blocks remain in `stage1.yaml`; add a dataset to
+the train and test `weights` mappings only after filling its local paths.
+
+Stage II inherits the complete Stage I configuration and overrides only its
+training schedule in `stage2.yaml`.  Start it with
+`python -m pi3.models.abot_recon.train --config-name stage2 model.ckpt=...`.
+Use the Stage I model file or EMA custom checkpoint for `model.ckpt`; do not use
+`train.resume` for a stage transition because the optimizer parameter groups
+change when the rotation refiner becomes trainable.
+
+`viz.py` writes one TensorBoard image grid every 500 optimizer steps by default.
+`abot_reconstruction` aligns its columns to uniformly sampled frames and shows
+world-frame pose, RGB, aligned predicted depth, ground-truth depth, relative
+point error, confidence and the validity mask.  Every pose cell contains the
+complete dashed GT path, the solid predicted prefix available at that frame,
+and separate GT and predicted SLAM camera frustums.  Validation records the
+first batch once per epoch.  The interval, frame count and panel sizes live
+under `abot_recon.visualization` in `stage1.yaml`.
 
 The 32-frame setting follows the report and can exceed available GPU memory.
 Lower `train.image_num_range` and `train.max_img_per_gpu` together for a
@@ -56,7 +77,7 @@ point, confidence and pose dictionary produced by the training forward.
 ```python
 from pi3.models.abot_recon import ABotRecon, infer_paths
 
-model = ABotRecon(load_vggt=False, ckpt="checkpoints/abot_recon.safetensors").cuda().eval()
+model = ABotRecon(ckpt="checkpoints/abot_recon.safetensors").cuda().eval()
 result = infer_paths(model, image_paths)
 ```
 
@@ -64,11 +85,10 @@ result = infer_paths(model, image_paths)
 example with KITTI Raw RGB/OXTS and official Depth Completion supervision.  The
 report uses a mixture of 30 datasets, dataset-specific temporal samplers,
 filtering and augmentation.  Exact data reproduction requires those internal
-datasets and policies.  The report also specifies EMA with decay 0.999, which
-the current Pi3 Accelerate trainer does not implement.
+datasets and policies.
 
 ```powershell
-python -m pi3.models.abot_recon.train model.ckpt=path/to/pi3.pth train_dataset.KITTIABotRecon.raw_root=path/to/kitti_raw train_dataset.KITTIABotRecon.depth_root=path/to/kitti_depth train_dataset.KITTIABotRecon.index_file=path/to/kitti.npy
+python -m pi3.models.abot_recon.train model.load_pi3=path/to/pi3.pth train_dataset.KITTIABotRecon.raw_root=path/to/kitti_raw train_dataset.KITTIABotRecon.depth_root=path/to/kitti_depth train_dataset.KITTIABotRecon.index_file=path/to/kitti.npy
 ```
 
 The dataset-only ABot-Recon contract can be rendered without loading a model.

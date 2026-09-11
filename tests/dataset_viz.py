@@ -304,6 +304,23 @@ def render_dataset_geometry(
     return canvas, statistics
 
 
+class DatasetGeometryVisualizer:
+    """Original reference-to-target warp inspection."""
+
+    def __init__(self, reference_index: int, depth_threshold: float, cell_width: int):
+        self.reference_index = int(reference_index)
+        self.depth_threshold = float(depth_threshold)
+        self.cell_width = int(cell_width)
+
+    def __call__(self, views: Sequence[Mapping]):
+        return render_dataset_geometry(
+            views,
+            reference_index=self.reference_index,
+            depth_threshold=self.depth_threshold,
+            cell_width=self.cell_width,
+        )
+
+
 def _sequence_key(sequence):
     if isinstance(sequence, list):
         return tuple(sequence)
@@ -362,19 +379,17 @@ def _timing_summary(samples: Sequence[float]) -> dict[str, int | float | list[fl
     }
 
 
-@hydra.main(
-    version_base="1.2",
-    config_path="../configs",
-    config_name="dataset_viz.yaml",
-)
-def main(cfg: DictConfig) -> None:
+def run(cfg: DictConfig) -> None:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     dataset_sizes: dict[str, dict[str, int]] = {}
     sample_timings: dict[str, dict[str, int | float | list[float]]] = {}
     sample_timings_path = output_dir / "sample_timings.json"
+    visualizer = hydra.utils.instantiate(cfg.visualizers[cfg.visualizer_name])
 
     for dataset_name, dataset_cfg in cfg.datasets.items():
+        if cfg.selected_datasets is not None and dataset_name not in cfg.selected_datasets:
+            continue
         dataset = hydra.utils.instantiate(dataset_cfg)
         dataset_sizes[dataset_name] = _dataset_volume(dataset)
         elapsed_samples: list[float] = []
@@ -388,12 +403,7 @@ def main(cfg: DictConfig) -> None:
             elapsed_samples.append(
                 round(toc(f"[{dataset_name}] sample {sample_index}"), 6)
             )
-            overview, statistics = render_dataset_geometry(
-                views,
-                reference_index=cfg.reference_index,
-                depth_threshold=cfg.depth_threshold,
-                cell_width=cfg.cell_width,
-            )
+            overview, statistics = visualizer(views)
             output_path = dataset_output_dir / f"sample_{sample_index:04d}.png"
             overview.save(output_path)
             print(f"\n[{sample_index}] {views[0]['label']} -> {output_path.resolve()}")
@@ -415,6 +425,15 @@ def main(cfg: DictConfig) -> None:
     )
     print(f"Dataset sizes -> {dataset_sizes_path.resolve()}")
     print(f"Sample timings -> {sample_timings_path.resolve()}")
+
+
+@hydra.main(
+    version_base="1.2",
+    config_path="../configs",
+    config_name="dataset_viz.yaml",
+)
+def main(cfg: DictConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

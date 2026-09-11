@@ -71,10 +71,11 @@ def create_dataloader(cfg, mode):
     world_size = get_world_size()
     rank = get_rank()
 
-    image_num_range = cfg.train.image_num_range if mode == 'train' else [8, 8]
+    mode_cfg = cfg.train if mode == 'train' else cfg.test
+    image_num_range = mode_cfg.image_num_range if 'image_num_range' in mode_cfg else [8, 8]
     print(f'Sampling frame number range from {image_num_range}')
     # adapte from vggt
-    max_img_per_gpu = cfg.train.max_img_per_gpu if 'max_img_per_gpu' in cfg.train else image_num_range[0]
+    max_img_per_gpu = mode_cfg.max_img_per_gpu if 'max_img_per_gpu' in mode_cfg else image_num_range[0]
     print(f'Max frame number per rank {max_img_per_gpu}')
     if mode == 'train' and cfg.train.iters_per_epoch > 0:
         print('Needed batch number per epoch (per rank):', (max_img_per_gpu // image_num_range[0]) * cfg.train.iters_per_epoch)

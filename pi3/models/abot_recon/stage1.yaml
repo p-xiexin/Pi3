@@ -8,10 +8,13 @@ model:
   pos_type: rope100
   decoder_size: large
   load_vggt: false
+  load_pi3: ???
+  ckpt: null
   freeze_encoder: false
   enable_confidence: false
   confidence_only_train: false
   enable_rotation_refiner: false
+  adj_pose_head_to_ckpt: false
   local_window_frames: 12
   num_dec_blk_not_to_checkpoint: 4
   point_z_log_max: 10.0
@@ -19,7 +22,6 @@ model:
   rope3d_fhw_dim: [20, 22, 22]
   max_frames: 4096
   gate_layers: null
-  ckpt: ???
 
 loss:
   train_loss:
@@ -53,6 +55,9 @@ train:
   print_freq: 40
   base_seed: 666
   model_dtype: bf16
+  # Existing Stage I checkpoints predate EMA. Enable this for a new Stage II run.
+  use_ema: false
+  ema_decay: 0.999
   dynamo_backend: NO
   dynamic_compile: false
   gradient_accumulation_steps: 1
@@ -99,10 +104,13 @@ test:
 
 train_dataset:
   length: 10000000
+  # Keep only datasets with valid local paths in this mapping. Table 1 relative
+  # weights for the migrated datasets are TartanAir 672, ScanNet 246,
+  # Waymo 538 and BlendedMVS 247.
   weights:
     KITTIABotRecon: 100000
   KITTIABotRecon:
-    _target_: pi3.models.abot_recon.kitti_dataset.KITTIABotReconDataset
+    _target_: pi3.models.abot_recon.dataset.KITTIABotReconDataset
     raw_root: ???
     depth_root: ???
     index_file: null
@@ -115,10 +123,66 @@ train_dataset:
     shuffle: false
     aug_crop: 0
     aug_focal: 0.9
-    transform:
+    transform: &abot_train_transform
       _partial_: true
       _target_: datasets.base.transforms.JitterJpegLossBlurring
     mode: train
+  # TartanAirABotRecon:
+  #   _target_: pi3.models.abot_recon.dataset.TartanAirABotReconDataset
+  #   data_root: null
+  #   max_distance: 24
+  #   z_far: 80
+  #   frame_num: 32
+  #   shuffle: false
+  #   random_sample_thres: 0.0
+  #   aug_crop: 0
+  #   aug_focal: 0.9
+  #   transform: *abot_train_transform
+  #   mode: train
+  # ScanNetABotRecon:
+  #   _target_: pi3.models.abot_recon.dataset.ScanNetABotReconDataset
+  #   data_root: null
+  #   max_distance: 240
+  #   z_far: 80
+  #   frame_num: 32
+  #   shuffle: false
+  #   random_sample_thres: 0.0
+  #   aug_crop: 0
+  #   aug_focal: 0.9
+  #   transform: *abot_train_transform
+  #   mode: train
+  # WaymoABotRecon:
+  #   _target_: pi3.models.abot_recon.dataset.WaymoABotReconDataset
+  #   data_root: null
+  #   index_file: null
+  #   camera_id: 0
+  #   frame_step: 1
+  #   depth_accumulate: 0
+  #   depth_cache_root: null
+  #   splat_radius: 0
+  #   z_far: 80
+  #   frame_num: 32
+  #   shuffle: false
+  #   random_sample_thres: 0.0
+  #   aug_crop: 0
+  #   aug_focal: 0.9
+  #   transform: *abot_train_transform
+  #   mode: train
+  # BlendedMVSABotRecon:
+  #   _target_: pi3.models.abot_recon.dataset.BlendedMVSABotReconDataset
+  #   data_root: null
+  #   index_file: null
+  #   pair_topk: 10
+  #   max_pair_hops: 2
+  #   min_depth_valid_ratio: 0.01
+  #   z_far: 0
+  #   frame_num: 32
+  #   shuffle: false
+  #   random_sample_thres: 0.0
+  #   aug_crop: 0
+  #   aug_focal: 0.9
+  #   transform: *abot_train_transform
+  #   mode: train
 
 train_dataloader:
   drop_last: true
@@ -128,7 +192,7 @@ test_dataset:
   weights:
     KITTIABotRecon: 2000
   KITTIABotRecon:
-    _target_: pi3.models.abot_recon.kitti_dataset.KITTIABotReconDataset
+    _target_: pi3.models.abot_recon.dataset.KITTIABotReconDataset
     raw_root: ${train_dataset.KITTIABotRecon.raw_root}
     depth_root: ${train_dataset.KITTIABotRecon.depth_root}
     index_file: ${train_dataset.KITTIABotRecon.index_file}
@@ -142,7 +206,7 @@ test_dataset:
     aug_crop: 0
     aug_focal: 1.0
     resolution: [[504, 280]]
-    transform:
+    transform: &abot_test_transform
       _partial_: true
       _target_: datasets.base.transforms.ImgToTensor
     mode: test
@@ -154,18 +218,17 @@ test_dataloader:
 abot_recon:
   visualization:
     enabled: true
-    interval_steps: 500
+    interval_steps: 100
     num_samples: 1
     num_frames: 8
     cell_width: 160
     relative_error_max: 0.2
-    trajectory_width: 960
-    trajectory_height: 520
-    trajectory_num_frames: 0
-    trajectory_columns: 8
-    trajectory_camera_scale: 0.08
+    pose_camera_scale: 0.14
+    # evo uses the XZ trajectory plane for KITTI. Embed it horizontally in 3D.
+    pose_plot_mode: xz
 
 data_viz:
+  dataset_name: KITTIABotRecon
   output_dir: ${work_dir}/outputs/abot_recon_dataset_viz
   sample_index: 0
   num_samples: 1

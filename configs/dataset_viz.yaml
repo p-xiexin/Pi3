@@ -68,6 +68,25 @@ datasets:
     seed: 2026
     transform: *image_transform
 
+  kitti_abot_recon:
+    _target_: pi3.models.abot_recon.dataset.KITTIABotReconDataset
+    raw_root: E:/Projects/Pi3/data/kitti_raw_minimal
+    depth_root: E:/Projects/Pi3/data/kitti_depth_minimal
+    index_file: E:/Projects/Pi3/data/dataset_cache/kitti_minimal.npy
+    cameras: [image_02]
+    splits: [train]
+    frame_step: 1
+    splat_radius: 0
+    resolution: [[504, 280]]
+    frame_num: 8
+    z_far: 80
+    aug_crop: 0
+    aug_focal: 1.0
+    mode: test
+    shuffle: false
+    seed: 2026
+    transform: *image_transform
+
   arkit:
     _target_: datasets.arkit_dataset.ARKitScenesPi3XDataset
     data_root: E:/Projects/Pi3/data/arkitscenes_minimal/raw
@@ -208,6 +227,22 @@ datasets:
 output_dir: ${hydra:runtime.cwd}/outputs/dataset_viz_all
 sample_index: 0
 num_samples: 1
+selected_datasets: null
+
+# Choose ``geometry`` for raw warp supervision or ``abot_recon`` for the
+# ordered image, depth, and validity training contract.
+visualizer_name: geometry
+visualizers:
+  geometry:
+    _target_: tests.dataset_viz.DatasetGeometryVisualizer
+    reference_index: ${reference_index}
+    depth_threshold: ${depth_threshold}
+    cell_width: ${cell_width}
+  abot_recon:
+    _target_: pi3.models.abot_recon.data_viz.ABotReconDatasetVisualizer
+    cell_width: ${cell_width}
+    max_frames: 8
+
 reference_index: 0
 depth_threshold: 0.05
 cell_width: 240

@@ -14,6 +14,7 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 class TemporalRotationRefiner(nn.Module):
@@ -129,10 +130,11 @@ class AdjacentPoseHead(nn.Module):
     def __init__(self, dim=512, hidden_dim=512, pair_hidden_dim=512,
                  num_pose_tokens=5, rot_correction_kernel=10,
                  rot_correction_max_deg=2.0, init_std=1e-4,
-                 enable_rotation_refiner=True):
+                 enable_rotation_refiner=True, use_checkpoint=False):
         super().__init__()
         self.num_pose_tokens = int(num_pose_tokens)
         self.enable_rotation_refiner = bool(enable_rotation_refiner)
+        self.use_checkpoint = bool(use_checkpoint)
         # Eq. (2): the shared phi_desc MLP is applied to every camera token.
         self.frame_descriptor = nn.Sequential(
             nn.LayerNorm(dim), nn.Linear(dim, hidden_dim), nn.ReLU(),
@@ -209,7 +211,13 @@ class AdjacentPoseHead(nn.Module):
         b, n, _, c = features.shape
         pose_tokens = features[:, :, :self.num_pose_tokens]
         # Eq. (2): z_i = mean_l phi_desc(c_i^l).
-        desc = self.frame_descriptor(pose_tokens.reshape(-1, self.num_pose_tokens, c)).mean(1)
+        flat_pose_tokens = pose_tokens.reshape(-1, self.num_pose_tokens, c)
+        if self.use_checkpoint and self.training:
+            desc = checkpoint(
+                self.frame_descriptor, flat_pose_tokens, use_reentrant=False
+            ).mean(1)
+        else:
+            desc = self.frame_descriptor(flat_pose_tokens).mean(1)
         desc = desc.reshape(b, n, -1)
         frame_tokens = features[:, :, self.num_pose_tokens:]
         identity = torch.eye(4, device=features.device, dtype=features.dtype).expand(b,4,4).clone()
@@ -217,11 +225,29 @@ class AdjacentPoseHead(nn.Module):
         buffer = None
         for index in range(1, n):
             # Eq. (4): initial T_(i-1<-i) from adjacent frame descriptors.
-            delta = self._delta(desc[:, index-1], desc[:, index])
+            delta_args = (desc[:, index-1], desc[:, index])
+            if self.use_checkpoint and self.training:
+                delta = checkpoint(self._delta, *delta_args, use_reentrant=False)
+            else:
+                delta = self._delta(*delta_args)
             if self.enable_rotation_refiner:
-                residual, buffer = self.rot_correction(
+                refine_args = (
                     desc[:, index-1], desc[:, index], frame_tokens[:, index-1],
-                    frame_tokens[:, index], buffer)
+                    frame_tokens[:, index],
+                )
+                if self.use_checkpoint and self.training:
+                    if buffer is None:
+                        residual, buffer = checkpoint(
+                            self.rot_correction, *refine_args,
+                            use_reentrant=False,
+                        )
+                    else:
+                        residual, buffer = checkpoint(
+                            self.rot_correction, *refine_args, buffer,
+                            use_reentrant=False,
+                        )
+                else:
+                    residual, buffer = self.rot_correction(*refine_args, buffer)
             else:
                 residual = desc.new_zeros((b, 3))
             refined = delta.clone()

@@ -1,9 +1,8 @@
 """Package-local TensorBoard diagnostics for ABot-Recon training.
 
-The reconstruction grid exposes the dense terms behind report Eq. (15), while
-the trajectory grid exposes the composed camera chain behind Eqs. (5), (12),
-and (14).  Rendering is deliberately detached and interval-gated so the CPU
-transfer and percentile calculations do not enter the training graph.
+One frame-aligned grid exposes the dense terms behind report Eq. (15) together
+with the composed camera chain behind Eqs. (5), (12), and (14).  Rendering is
+detached and interval-gated so CPU work does not enter the training graph.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ import torch
 from PIL import Image, ImageDraw
 from torchvision.transforms.functional import pil_to_tensor
 
-from pi3.models.abot_recon.loss import _rotation_angle
+from pi3.utils.geometry import se3_inverse
 
 
 def _to_uint8_rgb(image: torch.Tensor) -> Image.Image:
@@ -99,6 +98,60 @@ def _display_scale(predicted: torch.Tensor, target: torch.Tensor,
                        torch.ones_like(scale))
 
 
+def _poses_in_dataset_world(prediction: Mapping, sequence: Mapping,
+                            target: Mapping, point_scale: torch.Tensor):
+    """Map the predicted first-camera gauge into the dataset world frame."""
+
+    predicted = prediction["camera_poses"].detach().float().clone()
+    predicted[..., :3, 3] *= point_scale[:, None, None]
+    predicted_relative = se3_inverse(predicted[:, 0])[:, None] @ predicted
+
+    world_target = sequence["camera_poses"].detach().float()
+    world_anchor = world_target[:, 0]
+    anchor_rotation = world_anchor[:, :3, :3]
+    anchor_translation = world_anchor[:, :3, 3]
+
+    world_delta = world_target[..., :3, 3] - anchor_translation[:, None]
+    world_delta_in_anchor = torch.einsum(
+        "bij,bnj->bni", anchor_rotation.transpose(-2, -1), world_delta)
+    normalized_delta = target["camera_poses"][..., :3, 3].detach().float()
+    denominator = normalized_delta.square().sum((1, 2))
+    world_scale = (
+        (normalized_delta * world_delta_in_anchor).sum((1, 2))
+        / denominator.clamp_min(1e-8)
+    )
+    world_scale = torch.where(
+        torch.isfinite(world_scale) & (world_scale > 1e-6),
+        world_scale,
+        torch.ones_like(world_scale),
+    )
+    predicted_relative = predicted_relative.clone()
+    predicted_relative[..., :3, 3] *= world_scale[:, None, None]
+    world_predicted = world_anchor[:, None] @ predicted_relative
+    return world_predicted, world_target, world_scale
+
+
+def _poses_in_plot_frame(poses: torch.Tensor, plot_mode: str) -> torch.Tensor:
+    """Embed an evo-style trajectory plane in a right-handed 3D display frame."""
+
+    mode = str(plot_mode).lower()
+    if mode == "xy":
+        return poses
+    if mode != "xz":
+        raise ValueError("pose_plot_mode must be xy or xz")
+
+    # KITTI/OpenCV trajectories move mainly in XZ, with camera Y pointing down.
+    # Display X=source X, Y=source Z and Z=-source Y so the evo XZ plane becomes
+    # the horizontal ground plane while camera frustums retain their full pose.
+    display_from_source = poses.new_tensor([
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+    return display_from_source @ poses
+
+
 def _labeled_grid(rows: list[tuple[str, list[Image.Image]]], frame_ids: list[int],
                   cell_width: int, source_height: int, source_width: int) -> Image.Image:
     cell_height = max(round(source_height / source_width * cell_width), 1)
@@ -135,14 +188,16 @@ def prepare_abot_diagnostics(prediction: Mapping, sequence: Mapping, criterion):
     scale = _display_scale(
         predicted_points, target["local_points"], target["valid_masks"])
     aligned_points = predicted_points * scale[:, None, None, None, None]
-    predicted_poses = prediction["camera_poses"].detach().float().clone()
-    predicted_poses[..., :3, 3] *= scale[:, None, None]
+    world_predicted, world_target, world_scale = _poses_in_dataset_world(
+        prediction, sequence, target, scale)
     point_error = (aligned_points - target["local_points"]).norm(dim=-1)
     relative_error = point_error / target["local_points"].norm(dim=-1).clamp_min(1e-3)
     return {
         "target": target,
         "aligned_points": aligned_points,
-        "predicted_poses": predicted_poses,
+        "world_predicted_poses": world_predicted,
+        "world_target_poses": world_target,
+        "world_scale": world_scale,
         "point_error": point_error,
         "relative_error": relative_error,
         "display_scale": scale,
@@ -159,9 +214,11 @@ def render_reconstruction_overview(
     num_frames: int = 8,
     cell_width: int = 160,
     relative_error_max: float = 0.2,
+    pose_camera_scale: float = 0.14,
+    pose_plot_mode: str = "xy",
     diagnostics: Mapping | None = None,
 ) -> Image.Image:
-    """Render RGB, depth, error, confidence, and validity for one clip."""
+    """Render aligned pose, RGB, depth, error, confidence, and validity rows."""
 
     if diagnostics is None:
         diagnostics = prepare_abot_diagnostics(prediction, sequence, criterion)
@@ -198,7 +255,19 @@ def render_reconstruction_overview(
         for frame in indices
     ]
     valid_panels = [_gray_panel(valid[frame].float()) for frame in indices]
+    height, width = sequence["imgs"].shape[-2:]
+    cell_height = max(round(height / width * cell_width), 1)
+    pose_panels = _render_pose_panels(
+        diagnostics,
+        batch_index=batch_index,
+        frame_indices=indices,
+        panel_width=cell_width,
+        panel_height=cell_height,
+        camera_scale=pose_camera_scale,
+        plot_mode=pose_plot_mode,
+    )
     rows = [
+        ("Pose", pose_panels),
         ("RGB", rgb_panels),
         ("Pred depth", pred_depth_panels),
         ("GT depth", gt_depth_panels),
@@ -206,12 +275,12 @@ def render_reconstruction_overview(
         ("Confidence", confidence_panels),
         ("Valid mask", valid_panels),
     ]
-    height, width = sequence["imgs"].shape[-2:]
     return _labeled_grid(rows, indices, cell_width, height, width)
 
 
 def _draw_camera_frustum(ax, pose: torch.Tensor, scale: float, color: str,
-                         linestyle: str, linewidth: float) -> None:
+                         linestyle: str, linewidth: float,
+                         fill_plane: bool = False) -> None:
     """Draw an OpenCV-style camera looking along its positive local Z axis."""
 
     local = torch.tensor(
@@ -231,6 +300,11 @@ def _draw_camera_frustum(ax, pose: torch.Tensor, scale: float, color: str,
         segment = world[[start, end]]
         ax.plot(segment[:, 0], segment[:, 1], segment[:, 2],
                 color=color, linestyle=linestyle, linewidth=linewidth)
+    if fill_plane:
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+        ax.add_collection3d(Poly3DCollection(
+            [world[1:].numpy()], facecolor=color, edgecolor="none", alpha=0.09))
 
 
 def _set_3d_limits(ax, center: torch.Tensor, radius: float) -> None:
@@ -241,44 +315,24 @@ def _set_3d_limits(ax, center: torch.Tensor, radius: float) -> None:
 
 
 @torch.no_grad()
-def render_trajectory_overview(
-    prediction: Mapping,
-    sequence: Mapping,
-    criterion,
+def _render_pose_panels(
+    diagnostics: Mapping,
     *,
-    batch_index: int = 0,
-    canvas_width: int = 960,
-    canvas_height: int = 520,
-    num_frames: int = 8,
-    columns: int = 4,
-    camera_scale: float = 0.08,
-    diagnostics: Mapping | None = None,
-) -> Image.Image:
-    """Render streaming 3D trajectory and camera pairs at sampled time steps.
+    batch_index: int,
+    frame_indices: list[int],
+    panel_width: int,
+    panel_height: int,
+    camera_scale: float,
+    plot_mode: str,
+) -> list[Image.Image]:
+    """Render world-aligned SLAM frustums for the sampled image columns."""
 
-    Every panel shows the complete GT trajectory as a dashed line and the
-    predicted trajectory prefix available at that time step as a solid line.
-    Dashed and solid camera frustums mark the current GT and predicted poses.
-    """
-
-    if diagnostics is None:
-        diagnostics = prepare_abot_diagnostics(prediction, sequence, criterion)
-    predicted = diagnostics["predicted_poses"][batch_index].detach().float().cpu()
-    target = diagnostics["target"]["camera_poses"][batch_index].detach().float().cpu()
+    predicted = _poses_in_plot_frame(
+        diagnostics["world_predicted_poses"][batch_index].cpu(), plot_mode)
+    target = _poses_in_plot_frame(
+        diagnostics["world_target_poses"][batch_index].cpu(), plot_mode)
     pred_translation = predicted[:, :3, 3]
     gt_translation = target[:, :3, 3]
-    translation_error = (pred_translation - gt_translation).norm(dim=-1)
-    rotation_error = torch.rad2deg(_rotation_angle(
-        predicted[:, :3, :3], target[:, :3, :3]))
-    render_every_frame = int(num_frames) <= 0
-    indices = (list(range(len(target))) if render_every_frame
-               else _frame_indices(len(target), num_frames))
-    columns = min(max(int(columns), 1), len(indices))
-    rows = math.ceil(len(indices) / columns)
-    if render_every_frame:
-        canvas_width = max(canvas_width, columns * 220)
-        canvas_height = rows * 200 + 50
-
     all_centers = torch.cat((gt_translation, pred_translation), 0)
     minimum = all_centers.amin(0)
     maximum = all_centers.amax(0)
@@ -289,59 +343,45 @@ def render_trajectory_overview(
 
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
-    from matplotlib.lines import Line2D
 
+    count = len(frame_indices)
     dpi = 100
     figure = Figure(
-        figsize=(canvas_width / dpi, canvas_height / dpi), dpi=dpi,
+        figsize=(panel_width * count / dpi, panel_height / dpi),
+        dpi=dpi,
         facecolor="white",
     )
-    figure.subplots_adjust(left=0.02, right=0.98, bottom=0.04, top=0.82,
-                           wspace=0.05, hspace=0.18)
-    for panel_index, frame_index in enumerate(indices):
-        ax = figure.add_subplot(rows, columns, panel_index + 1, projection="3d")
+    figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0,
+                           wspace=0.0, hspace=0.0)
+    for panel_index, frame_index in enumerate(frame_indices):
+        ax = figure.add_subplot(1, count, panel_index + 1, projection="3d")
+        ax.set_facecolor("white")
+        ax.set_proj_type("ortho")
         ax.plot(gt_translation[:, 0], gt_translation[:, 1], gt_translation[:, 2],
-                color="0.35", linestyle="--", linewidth=1.5)
+                color="0.55", linestyle="--", linewidth=1.1)
         prefix = pred_translation[:frame_index + 1]
         ax.plot(prefix[:, 0], prefix[:, 1], prefix[:, 2],
-                color="#2468d8", linestyle="-", linewidth=2.0)
+                color="#2468d8", linestyle="-", linewidth=1.8)
         _draw_camera_frustum(
-            ax, target[frame_index], frustum_scale * 1.12,
-            color="0.25", linestyle="--", linewidth=1.1)
+            ax, target[frame_index], frustum_scale * 1.08,
+            color="0.45", linestyle="--", linewidth=0.9)
         _draw_camera_frustum(
             ax, predicted[frame_index], frustum_scale,
-            color="#d9362b", linestyle="-", linewidth=1.4)
-        ax.scatter(*gt_translation[frame_index], color="0.25", s=8)
-        ax.scatter(*pred_translation[frame_index], color="#d9362b", s=10)
+            color="#2468d8", linestyle="-", linewidth=1.2, fill_plane=True)
         _set_3d_limits(ax, center, radius)
-        ax.view_init(elev=24, azim=-62)
-        ax.set_title(
-            f"frame {frame_index}   t {translation_error[frame_index]:.3g}   "
-            f"R {rotation_error[frame_index]:.2f} deg",
-            fontsize=7,
-            pad=1,
-        )
-        ax.tick_params(labelsize=5, pad=-2)
-        ax.set_xlabel("X", fontsize=6, labelpad=-5)
-        ax.set_ylabel("Y", fontsize=6, labelpad=-5)
-        ax.set_zlabel("Z", fontsize=6, labelpad=-5)
-        ax.grid(True, linewidth=0.35, alpha=0.45)
-    figure.legend(
-        handles=[
-            Line2D([0], [0], color="0.35", linestyle="--", label="GT full trajectory / camera"),
-            Line2D([0], [0], color="#2468d8", linestyle="-", label="predicted prefix"),
-            Line2D([0], [0], color="#d9362b", linestyle="-", label="predicted camera"),
-        ],
-        loc="upper center",
-        ncol=3,
-        frameon=False,
-        fontsize=8,
-    )
+        ax.view_init(elev=30, azim=-70)
+        ax.set_axis_off()
+
     canvas = FigureCanvasAgg(figure)
     canvas.draw()
-    return Image.frombuffer(
+    combined = Image.frombuffer(
         "RGBA", canvas.get_width_height(), canvas.buffer_rgba(), "raw", "RGBA", 0, 1
     ).convert("RGB")
+    boundaries = [round(index * combined.width / count) for index in range(count + 1)]
+    return [
+        combined.crop((boundaries[index], 0, boundaries[index + 1], combined.height))
+        for index in range(count)
+    ]
 
 
 class ABotReconTensorBoardVisualizer:
@@ -389,7 +429,6 @@ class ABotReconTensorBoardVisualizer:
                            sequence["imgs"].shape[0])
         diagnostics = prepare_abot_diagnostics(prediction, sequence, criterion)
         reconstruction = []
-        trajectory = []
         for batch_index in range(sample_count):
             reconstruction.append(pil_to_tensor(render_reconstruction_overview(
                 prediction,
@@ -399,23 +438,12 @@ class ABotReconTensorBoardVisualizer:
                 num_frames=int(self.config.get("num_frames", 8)),
                 cell_width=int(self.config.get("cell_width", 160)),
                 relative_error_max=float(self.config.get("relative_error_max", 0.2)),
-                diagnostics=diagnostics,
-            )))
-            trajectory.append(pil_to_tensor(render_trajectory_overview(
-                prediction,
-                sequence,
-                criterion,
-                batch_index=batch_index,
-                canvas_width=int(self.config.get("trajectory_width", 960)),
-                canvas_height=int(self.config.get("trajectory_height", 520)),
-                num_frames=int(self.config.get("trajectory_num_frames", 8)),
-                columns=int(self.config.get("trajectory_columns", 4)),
-                camera_scale=float(self.config.get("trajectory_camera_scale", 0.08)),
+                pose_camera_scale=float(self.config.get("pose_camera_scale", 0.14)),
+                pose_plot_mode=str(self.config.get("pose_plot_mode", "xy")),
                 diagnostics=diagnostics,
             )))
         images = {
             f"{tag_prefix}/abot_reconstruction": torch.stack(reconstruction),
-            f"{tag_prefix}/abot_trajectory": torch.stack(trajectory),
         }
         for tracker in accelerator.trackers:
             tracker.log_images(images, step=log_step)

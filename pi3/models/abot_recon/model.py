@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from functools import partial
+from collections.abc import Mapping
 import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
@@ -29,7 +30,7 @@ from .rope3d import RoPE3D, apply_rope3d
 
 
 def _checkpoint_state(path: str):
-    """Extract a model state dict from the checkpoint containers used by Pi3."""
+    """Extract and normalize a model state dict from supported containers."""
 
     if str(path).lower().endswith(".safetensors"):
         state = load_file(str(path), device="cpu")
@@ -39,7 +40,43 @@ def _checkpoint_state(path: str):
         state = state["state_dict"]
     elif isinstance(state, dict) and isinstance(state.get("model"), dict):
         state = state["model"]
+    if not isinstance(state, Mapping):
+        raise TypeError(f"Checkpoint {path} does not contain a model state dict")
+
+    state = dict(state)
+    removed_prefix = True
+    while removed_prefix:
+        removed_prefix = False
+        for prefix in ("module.", "_orig_mod."):
+            if state and all(key.startswith(prefix) for key in state):
+                state = {key[len(prefix):]: value for key, value in state.items()}
+                removed_prefix = True
     return state
+
+
+def _pi3_compatible_state(checkpoint_state, model_state):
+    """Keep only shape-compatible Pi3 representation and geometry weights."""
+
+    prefixes = (
+        "encoder.",
+        "decoder.",
+        "point_decoder.",
+        "point_head.",
+        "camera_decoder.",
+        "register_token",
+        "image_mean",
+        "image_std",
+    )
+    compatible = {}
+    for key, value in checkpoint_state.items():
+        if not key.startswith(prefixes) or key not in model_state:
+            continue
+        if (
+            hasattr(value, "shape")
+            and tuple(value.shape) == tuple(model_state[key].shape)
+        ):
+            compatible[key] = value
+    return compatible
 
 
 class ABotRecon(Pi3):
@@ -55,11 +92,14 @@ class ABotRecon(Pi3):
         self,
         pos_type="rope100",
         decoder_size="large",
-        load_vggt=True,
+        load_vggt=False,
+        load_pi3=None,
+        ckpt=None,
         freeze_encoder=True,
         enable_confidence=None,
         confidence_only_train=False,
         enable_rotation_refiner=True,
+        adj_pose_head_to_ckpt=False,
         local_window_frames=12,
         num_dec_blk_not_to_checkpoint=4,
         point_z_log_max=10.0,
@@ -67,13 +107,18 @@ class ABotRecon(Pi3):
         rope3d_fhw_dim=(20, 22, 22),
         max_frames=4096,
         gate_layers=None,
-        ckpt=None,
     ):
-        checkpoint_state = _checkpoint_state(ckpt) if ckpt is not None else None
+        if load_pi3 is not None and ckpt is not None:
+            raise ValueError("Pi3 initialization and ckpt are mutually exclusive")
+        if load_pi3 is not None and load_vggt:
+            raise ValueError("load_pi3 and load_vggt are mutually exclusive")
+
+        pi3_state = _checkpoint_state(load_pi3) if load_pi3 is not None else None
+        model_state = _checkpoint_state(ckpt) if ckpt is not None else None
         if enable_confidence is None:
-            enable_confidence = bool(checkpoint_state) and any(
+            enable_confidence = bool(model_state) and any(
                 key.startswith(("conf_decoder.", "conf_head."))
-                for key in checkpoint_state)
+                for key in model_state)
         super().__init__(
             pos_type=pos_type,
             decoder_size=decoder_size,
@@ -107,6 +152,7 @@ class ABotRecon(Pi3):
             rot_correction_kernel=10,
             rot_correction_max_deg=2.0,
             enable_rotation_refiner=enable_rotation_refiner,
+            use_checkpoint=adj_pose_head_to_ckpt,
         )
         if not enable_rotation_refiner:
             freeze_all_params([self.camera_head.rot_correction])
@@ -123,18 +169,40 @@ class ABotRecon(Pi3):
             self.conf_decoder = deepcopy(self.point_decoder)
             self.conf_head = LinearPts3d(
                 patch_size=14, dec_embed_dim=1024, output_dim=1)
-        if checkpoint_state is not None:
-            result = self.load_state_dict(checkpoint_state, strict=False)
+        if pi3_state is not None:
+            compatible = _pi3_compatible_state(pi3_state, self.state_dict())
+            if not compatible:
+                raise RuntimeError(f"No compatible Pi3 weights found in {load_pi3}")
+            result = self.load_state_dict(compatible, strict=False)
+            print(
+                f"[ABot-Recon] loaded {len(compatible)}/{len(pi3_state)} "
+                f"compatible Pi3 tensors from {load_pi3}: {result}",
+                flush=True,
+            )
+        if model_state is not None:
+            required_abot_keys = (
+                "camera_head.delta_t_head.weight",
+                "camera_head.delta_q_head.weight",
+            )
+            missing_abot_keys = [
+                key for key in required_abot_keys if key not in model_state
+            ]
+            if missing_abot_keys:
+                raise RuntimeError(
+                    f"ckpt {ckpt} is not an ABot-Recon checkpoint; "
+                    f"missing {missing_abot_keys}. Use load_pi3 for Pi3 weights."
+                )
+            result = self.load_state_dict(model_state, strict=False)
             checkpoint_has_confidence = any(
                 key.startswith(("conf_decoder.", "conf_head."))
-                for key in checkpoint_state)
+                for key in model_state)
             if self.enable_confidence and not checkpoint_has_confidence:
                 self.conf_decoder.load_state_dict(
                     self.point_decoder.state_dict(), strict=True)
                 print(
                     "[ABot-Recon] initialized conf_decoder from the loaded point_decoder",
                     flush=True)
-            print(f"[ABot-Recon] loaded {ckpt}: {result}", flush=True)
+            print(f"[ABot-Recon] loaded model checkpoint {ckpt}: {result}", flush=True)
         if self.confidence_only_train:
             if not self.enable_confidence:
                 raise ValueError("confidence_only_train requires enable_confidence")

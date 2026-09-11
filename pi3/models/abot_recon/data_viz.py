@@ -133,8 +133,9 @@ class ABotReconDatasetVisualizer:
 @hydra.main(version_base="1.2", config_path=".", config_name="stage1")
 def main(cfg: DictConfig) -> None:
     options = cfg.data_viz
+    dataset_name = str(options.dataset_name)
     dataset = hydra.utils.instantiate(
-        cfg.train_dataset.KITTIABotRecon,
+        cfg.train_dataset[dataset_name],
         resolution=cfg.train.resolution,
         frame_num=options.frame_num,
         mode="test",
@@ -142,6 +143,7 @@ def main(cfg: DictConfig) -> None:
     visualizer = ABotReconDatasetVisualizer(options.cell_width, options.max_frames)
     output_dir = Path(options.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"dataset={dataset_name}")
     for sample_index in range(options.sample_index, options.sample_index + options.num_samples):
         views = dataset[sample_index % len(dataset)]
         overview, statistics = visualizer(views)
