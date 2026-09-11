@@ -104,6 +104,165 @@ def confidence_loss(
     )
 
 
+def _pixel_warp_to_unit_rays(
+    warp: torch.Tensor,
+    inverse_intrinsics: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    """Unproject ``[B,T,2,H,W]`` full-image pixels to target-camera unit rays."""
+
+    xy = warp.permute(0, 1, 3, 4, 2)
+    homogeneous = torch.cat((xy, torch.ones_like(xy[..., :1])), dim=-1)
+    # Pose-Ray Eq. (2): r^b = normalize(K_b^{-1} [u^b, v^b, 1]^T).
+    rays = torch.einsum("btij,bthwj->bthwi", inverse_intrinsics, homogeneous)
+    return F.normalize(rays, dim=-1, eps=epsilon)
+
+
+class PoseRayGeometryLoss(nn.Module):
+    """Pose-conditioned ray supervision for Glob3R dense correspondences.
+
+    Argus supervises independently predicted depth and point maps across several
+    coordinate frames. Glob3R's trainable geometric output is a target pixel for
+    every reference pixel, so the corresponding constraint is expressed in the
+    target-camera ray space. Ground-truth depth and pose induce the geometric ray,
+    while the predicted warp defines the learned ray.
+
+    The local equations used below are
+
+        W* = pi(K_b T_(b<-a) (D_a K_a^{-1} x_a))
+        r* = normalize(K_b^{-1} [W*, 1]^T)
+        r_hat = normalize(K_b^{-1} [W_hat, 1]^T)
+        theta = atan2(||r_hat x r*||_2, r_hat^T r*)
+        L_pose-ray = mean((theta^2 + epsilon^2)^(alpha / 2))
+
+    The visibility mask follows Glob3R Eqs. (29)-(30), and every enabled coarse
+    or refinement warp stage receives the same pose-conditioned supervision.
+    """
+
+    def __init__(
+        self,
+        depth_threshold: float = 0.05,
+        robust_epsilon: float = 1.0e-3,
+        robust_alpha: float = 1.0,
+        ray_epsilon: float = 1.0e-8,
+    ) -> None:
+        super().__init__()
+        if depth_threshold <= 0:
+            raise ValueError("depth_threshold must be positive")
+        if robust_epsilon <= 0:
+            raise ValueError("robust_epsilon must be positive")
+        if not 0 < robust_alpha <= 2:
+            raise ValueError("robust_alpha must be in (0, 2]")
+        if ray_epsilon <= 0:
+            raise ValueError("ray_epsilon must be positive")
+        self.depth_threshold = float(depth_threshold)
+        self.robust_epsilon = float(robust_epsilon)
+        self.robust_alpha = float(robust_alpha)
+        self.ray_epsilon = float(ray_epsilon)
+
+    @staticmethod
+    def _stack_batch(
+        batch: Sequence[Dict[str, torch.Tensor]],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        depths = torch.stack([view["depthmap"] for view in batch], dim=1).float()
+        intrinsics = torch.stack(
+            [view["camera_intrinsics"] for view in batch], dim=1
+        ).float()
+        world_from_camera = torch.stack(
+            [view["camera_pose"] for view in batch], dim=1
+        ).float()
+        return depths, intrinsics, world_from_camera
+
+    def forward(
+        self,
+        predictions: Dict[str, torch.Tensor],
+        batch: Sequence[Dict[str, torch.Tensor]],
+    ):
+        depths, intrinsics, world_from_camera = self._stack_batch(batch)
+        reference_index = int(predictions.get("reference_index", 0))
+        target_indices = predictions["target_indices"]
+        if isinstance(target_indices, torch.Tensor):
+            target_indices = target_indices.tolist()
+        target_indices = [int(index) for index in target_indices]
+
+        reference_pose = world_from_camera[:, reference_index]
+        # Pose-Ray Eq. (1): T_(b<-a) = T_(w<-b)^{-1} T_(w<-a).
+        target_from_reference = (
+            torch.linalg.inv(world_from_camera[:, target_indices])
+            @ reference_pose[:, None]
+        )
+        # Pose-Ray Eq. (1): project D_a K_a^{-1} x_a through T_(b<-a) and K_b.
+        # build_ground_truth_warp also supplies the occlusion-aware valid set.
+        supervision = build_ground_truth_warp(
+            depths[:, reference_index],
+            depths[:, target_indices],
+            intrinsics[:, reference_index],
+            intrinsics[:, target_indices],
+            target_from_reference,
+            self.depth_threshold,
+        )
+        inverse_target_intrinsics = torch.linalg.inv(
+            intrinsics[:, target_indices]
+        )
+
+        warp_predictions = [
+            predictions["coarse_warp"],
+            *predictions.get("warp_stages", []),
+        ]
+        loss_terms = []
+        angle_terms = []
+        valid_ratios = []
+        differentiable_zero = warp_predictions[0].sum() * 0.0
+
+        for predicted_warp in warp_predictions:
+            size = predicted_warp.shape[-2:]
+            ground_truth_warp = _resize_warp(supervision.warp, size)
+            valid = _resize_scalar_map(
+                supervision.confidence, size, "nearest"
+            ).bool()
+            valid_ratios.append(valid.float().mean())
+            if not valid.any():
+                continue
+
+            # Pose-Ray Eq. (2): unproject predicted and geometric target pixels.
+            predicted_rays = _pixel_warp_to_unit_rays(
+                predicted_warp.float(), inverse_target_intrinsics, self.ray_epsilon
+            )
+            geometry_rays = _pixel_warp_to_unit_rays(
+                ground_truth_warp, inverse_target_intrinsics, self.ray_epsilon
+            )
+            cosine = (predicted_rays * geometry_rays).sum(dim=-1).clamp(-1.0, 1.0)
+            sine = torch.linalg.vector_norm(
+                torch.cross(predicted_rays, geometry_rays, dim=-1), dim=-1
+            )
+            # Pose-Ray Eq. (3): stable angular residual in [0, pi].
+            angular_error = torch.atan2(sine, cosine)
+            # Pose-Ray Eq. (4): generalized Charbonnier penalty over valid rays.
+            penalty = (
+                angular_error.square() + self.robust_epsilon**2
+            ).pow(self.robust_alpha / 2)
+            loss_terms.append(penalty[valid].mean())
+            angle_terms.append(angular_error[valid].mean())
+
+        if loss_terms:
+            loss = torch.stack(loss_terms).mean()
+            mean_angle = torch.stack(angle_terms).mean()
+        else:
+            loss = differentiable_zero
+            mean_angle = differentiable_zero.detach()
+        valid_ratio = (
+            torch.stack(valid_ratios).mean()
+            if valid_ratios
+            else differentiable_zero.detach()
+        )
+
+        return loss, {
+            "loss_pose_ray": loss.detach(),
+            "loss_pose_ray_angle_deg": torch.rad2deg(mean_angle.detach()),
+            "pose_ray_valid_ratio": valid_ratio.detach(),
+        }
+
+
 class Glob3RMatchingLoss(nn.Module):
     """Complete Glob3R coarse/refinement training objective.
 

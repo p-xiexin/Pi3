@@ -13,6 +13,7 @@ _EXPORTS = {
     "MatchingOutput": (".model", "MatchingOutput"),
     "load_romav2_refinement": (".model", "load_romav2_refinement"),
     "Glob3RMatchingLoss": (".loss", "Glob3RMatchingLoss"),
+    "PoseRayGeometryLoss": (".loss", "PoseRayGeometryLoss"),
     "Glob3R": (".glob3r_training", "Glob3R"),
     "WarpSupervision": (".geometry", "WarpSupervision"),
     "build_ground_truth_warp": (".geometry", "build_ground_truth_warp"),

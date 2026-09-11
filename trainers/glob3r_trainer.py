@@ -63,6 +63,12 @@ def _load_geometry_backbone(backbone, checkpoint_path):
 class Glob3RTrainer(Pi3Trainer):
     def __init__(self, cfg):
         super().__init__(cfg)
+        pose_ray_cfg = self.cfg.loss.get("pose_ray", None)
+        self.pose_ray_loss = None
+        self.pose_ray_weight = 0.0
+        if pose_ray_cfg is not None and bool(pose_ray_cfg.get("enabled", False)):
+            self.pose_ray_loss = hydra.utils.instantiate(pose_ray_cfg.criterion)
+            self.pose_ray_weight = float(pose_ray_cfg.get("weight", 1.0))
         self.visualizer = Glob3RTensorBoardVisualizer(
             self.cfg.glob3r.get("visualization", {}),
             self.cfg.train.gradient_accumulation_steps,
@@ -115,6 +121,15 @@ class Glob3RTrainer(Pi3Trainer):
 
     def calculate_loss(self, output, batch, mode="train"):
         result = super().calculate_loss(output, batch, mode)
+        if self.pose_ray_loss is not None:
+            prediction, raw_batch = output
+            pose_ray_loss, pose_ray_details = self.pose_ray_loss(
+                prediction, raw_batch
+            )
+            weighted_pose_ray_loss = self.pose_ray_weight * pose_ray_loss
+            result.loss = result.loss + weighted_pose_ray_loss
+            result.update(pose_ray_details)
+            result.loss_pose_ray_weighted = weighted_pose_ray_loss.detach()
         self.visualizer.log(self.accelerator, output, mode)
         return result
 

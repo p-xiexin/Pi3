@@ -34,11 +34,14 @@ model:
   ckpt: null
 
 glob3r:
+  # 1. 预训练 Pi3 几何主干权重，coarse 和 refinement 都需要先加载。
   backbone_checkpoint: null
   encoder_layers: [5, 11, 17, 23]
   stage: coarse
   enable_refinement: true
+  # 2. 已训练的 Glob3R matching 权重。coarse 从 null 开始训练，refinement 加载 coarse 的 best_model。
   matching_checkpoint: null
+  # 3. 可选的 RoMaV2 refinement 权重，仅在 refinement 阶段加载，并覆盖兼容的 refinement 参数。
   romav2_refinement_checkpoint: null
   require_pretrained_backbone: true
   visualization:
@@ -62,6 +65,16 @@ loss:
     train_sky: true
   test_loss:
     <<: *matching_loss
+  # Set enabled=false for the matching-only ablation.
+  pose_ray:
+    enabled: true
+    weight: 1.0
+    criterion:
+      _target_: pi3.models.glob3r.loss.PoseRayGeometryLoss
+      depth_threshold: 0.05
+      robust_epsilon: 1.0e-3
+      robust_alpha: 1.0
+      ray_epsilon: 1.0e-8
 
 # Appendix B coarse stage: 64K micro-steps / accumulation 2 = 32K updates.
 train:
