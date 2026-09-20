@@ -16,11 +16,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from pi3.models.loss import PointLoss
 from pi3.utils.geometry import homogenize_points, se3_inverse
-from pi3.utils.alignment import align_points_scale
-
-from .data import prepare_abot_batch, validate_training_batch
-
 
 def _masked_mean(value, mask, eps=1e-8):
     """Average only valid geometric elements while preserving a zero-loss graph."""
@@ -44,6 +41,58 @@ def _rotation_angle(prediction, target):
     return torch.atan2(sine, cosine.clamp(-1.0, 1.0))
 
 
+_ABOT_TO_PI3_DATASET = {
+    "TartanAirABotRecon": "TarTanAir",
+    "ScanNetABotRecon": "ScanNet",
+    "BlendedMVSABotRecon": "BlendedMVS",
+    "KITTIABotRecon": "KITTI",
+    "WaymoABotRecon": "Waymo",
+}
+
+
+def _pi3_dataset_names(names, batch_size):
+    """Translate adapter labels to the names used by Pi3 loss routing."""
+
+    if names is None:
+        values = ["Unknown"] * int(batch_size)
+    elif isinstance(names, str):
+        values = [names] * int(batch_size)
+    elif torch.is_tensor(names):
+        values = names.detach().cpu().tolist()
+    else:
+        values = list(names)
+    if len(values) != int(batch_size):
+        raise ValueError(
+            f"dataset_names has {len(values)} entries for batch size {batch_size}"
+        )
+    return [_ABOT_TO_PI3_DATASET.get(str(name), str(name)) for name in values]
+
+
+def _stack_training_views(views):
+    """Stack Pi3 view dictionaries without changing their dataset order."""
+
+    if not isinstance(views, (list, tuple)) or not views:
+        raise TypeError("ABotReconLoss expects a non-empty list of Pi3 views")
+    required = ("pts3d", "valid_mask", "camera_pose")
+    for frame_index, view in enumerate(views):
+        missing = [key for key in required if key not in view]
+        if missing:
+            raise KeyError(
+                f"ABot-Recon view {frame_index} is missing " + ", ".join(missing)
+            )
+
+    points = torch.stack([view["pts3d"] for view in views], dim=1)
+    masks = torch.stack([view["valid_mask"] for view in views], dim=1)
+    poses = torch.stack([view["camera_pose"] for view in views], dim=1)
+    if points.ndim != 5 or points.shape[-1] != 3:
+        raise ValueError("pts3d must stack to [B,N,H,W,3]")
+    if masks.shape != points.shape[:-1]:
+        raise ValueError("valid_mask must stack to [B,N,H,W]")
+    if poses.ndim != 4 or poses.shape[:2] != points.shape[:2] or poses.shape[-2:] != (4, 4):
+        raise ValueError("camera_pose must stack to [B,N,4,4]")
+    return points, masks, poses, views[0].get("dataset")
+
+
 class ABotReconLoss(nn.Module):
     """Executable form of the ABot-Recon objective in Eqs. (12)-(15).
 
@@ -61,7 +110,7 @@ class ABotReconLoss(nn.Module):
         confidence_weight=0.05,
         translation_weight=100.0,
         rotation_weight=1.0,
-        max_pair_gap=12,
+        max_pair_gap=11,
         gap_gamma=0.5,
         smooth_temporal_weight=1.0,
         confidence_error_threshold=0.02,
@@ -82,8 +131,15 @@ class ABotReconLoss(nn.Module):
         self.confidence_error_threshold = float(confidence_error_threshold)
         self.huber_delta = float(huber_delta)
         self.local_align_res = int(local_align_res)
+        # Reuse Pi3's implementation directly so inverse-depth weighting,
+        # robust scale alignment, depth-edge rejection, four-triangle normal
+        # construction and dataset-quality routing stay exactly synchronized.
+        self.pi3_point_loss = PointLoss(
+            local_align_res=self.local_align_res,
+            train_conf=False,
+        )
 
-    def prepare_targets(self, batch):
+    def prepare_targets(self, views):
         """Express GT geometry in the first-camera gauge used by Pi3 supervision.
 
         Local point maps remain in each current camera frame, matching ``P_i``
@@ -91,12 +147,10 @@ class ABotReconLoss(nn.Module):
         relative transforms used by Eq. (14) are gauge independent.
         """
 
-        if isinstance(batch, (list, tuple)):
-            batch = prepare_abot_batch(batch)
-        validate_training_batch(batch)
-        points = batch["world_points"].float()
-        masks = batch["valid_masks"].bool() & torch.isfinite(points).all(-1)
-        poses = batch["camera_poses"].float()
+        points, masks, poses, dataset_names = _stack_training_views(views)
+        points = points.float()
+        masks = masks.bool() & torch.isfinite(points).all(-1)
+        poses = poses.float()
         # Remove the arbitrary dataset world frame.  This transformation leaves
         # all relative poses in Eqs. (12)-(14) unchanged.
         first_w2c = se3_inverse(poses[:, 0])
@@ -121,63 +175,39 @@ class ABotReconLoss(nn.Module):
             "global_points": global_points,
             "valid_masks": masks,
             "camera_poses": poses,
+            "dataset_names": _pi3_dataset_names(
+                dataset_names, points.shape[0]
+            ),
         }
-
-    def _sample_valid(self, value, mask):
-        """Deterministically reduce valid pixels for Pi3 robust scale alignment."""
-
-        sampled = []
-        for batch_index in range(value.shape[0]):
-            valid = value[batch_index][mask[batch_index]]
-            if valid.numel() == 0:
-                valid = value.new_ones((1, value.shape[-1]))
-            valid = valid.transpose(0, 1)[None]
-            valid = F.interpolate(
-                valid, size=self.local_align_res, mode="nearest")
-            sampled.append(valid[0].transpose(0, 1))
-        return torch.stack(sampled)
-
-    def _point_scale(self, predicted, target, mask, depth_weight):
-        """Solve the scale ambiguity of the local point maps without gradients."""
-
-        with torch.no_grad():
-            pred_sample = self._sample_valid(predicted, mask).contiguous()
-            target_sample = self._sample_valid(target, mask).contiguous()
-            weight_sample = self._sample_valid(depth_weight[..., None], mask)[..., 0]
-            scale = align_points_scale(
-                pred_sample, target_sample, weight_sample.contiguous())
-            return scale.abs().clamp_min(1e-4)
 
     def _point_and_normal_loss(self, prediction, target):
         """Compute ``L_pts`` and ``L_normal`` appearing in Eq. (15).
 
-        The report inherits these terms from Pi3.  This implementation therefore
-        uses Pi3's robust scalar alignment, inverse-depth point weighting, and
-        finite-difference surface normals.
+        The report inherits these terms from Pi3.  Delegate their computation
+        to ``PointLoss`` instead of maintaining a numerically different copy.
         """
 
         pred_points = prediction["local_points"].float()
         gt_points = target["local_points"]
         mask = target["valid_masks"]
-        depth_weight = 1.0 / gt_points[..., 2].abs().clamp_min(0.1)
-        scale = self._point_scale(
-            pred_points, gt_points, mask, depth_weight)
+        _, pi3_details, scale = self.pi3_point_loss(
+            {"local_points": pred_points}, target
+        )
+        point_loss = pi3_details["local_pts_loss"]
+        normal_loss = pi3_details["normal_loss"]
+
+        # Stage III confidence labels use the same aligned, inverse-depth
+        # weighted point residual produced inside Pi3's PointLoss.
+        depth_weight = gt_points[..., 2]
+        valid_weight = mask.to(depth_weight.dtype)
+        weighted_depth_mean = (
+            (depth_weight * valid_weight).mean(dim=(-2, -1), keepdim=True)
+            / valid_weight.mean(dim=(-2, -1), keepdim=True).add(1e-7)
+        )
+        depth_weight = depth_weight.clamp_min(0.1 * weighted_depth_mean)
+        depth_weight = 1.0 / (depth_weight + 1e-6)
         aligned = pred_points * scale[:, None, None, None, None]
         point_error = (aligned - gt_points).abs() * depth_weight[..., None]
-        point_loss = _masked_mean(point_error, mask)
-
-        # Local horizontal and vertical tangents define the normal supervision
-        # used by the Eq. (15) L_normal term.
-        pred_dx = aligned[..., :, 1:, :] - aligned[..., :, :-1, :]
-        pred_dy = aligned[..., 1:, :, :] - aligned[..., :-1, :, :]
-        gt_dx = gt_points[..., :, 1:, :] - gt_points[..., :, :-1, :]
-        gt_dy = gt_points[..., 1:, :, :] - gt_points[..., :-1, :, :]
-        pred_normal = torch.cross(pred_dx[..., :-1, :, :], pred_dy[..., :, :-1, :], -1)
-        gt_normal = torch.cross(gt_dx[..., :-1, :, :], gt_dy[..., :, :-1, :], -1)
-        normal_mask = (mask[..., :-1, :-1] & mask[..., :-1, 1:] &
-                       mask[..., 1:, :-1])
-        normal_error = 1.0 - F.cosine_similarity(pred_normal, gt_normal, dim=-1, eps=1e-6)
-        normal_loss = _masked_mean(normal_error, normal_mask)
         return point_loss, normal_loss, scale, aligned, point_error.mean(-1)
 
     def _pose_loss(self, prediction, target, point_scale):

@@ -3,12 +3,12 @@
 from itertools import islice
 
 import hydra
+import torch
 from omegaconf import DictConfig
 
 from trainers.base_trainer_accelerate import BaseTrainer
 from trainers.pi3_trainer import Pi3Trainer
 
-from .data import prepare_abot_batch, validate_training_batch
 from .ema import ABotReconEMA
 from .viz import ABotReconTensorBoardVisualizer
 
@@ -126,11 +126,10 @@ class ABotReconTrainer(Pi3Trainer):
         )
 
     def forward_batch(self, batch, mode="train"):
-        sequence = prepare_abot_batch(batch)
-        if mode == "train":
-            validate_training_batch(sequence)
-        prediction = self.model(sequence["imgs"])
-        return [prediction, sequence]
+        del mode
+        imgs = torch.stack([view["img"] for view in batch], dim=1)
+        prediction = self.model(imgs)
+        return [prediction, batch]
 
     def calculate_loss(self, output, batch, mode="train"):
         result = super().calculate_loss(output, batch, mode)

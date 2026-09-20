@@ -8,7 +8,7 @@ detached and interval-gated so CPU work does not enter the training graph.
 from __future__ import annotations
 
 import math
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import torch
 from PIL import Image, ImageDraw
@@ -98,7 +98,7 @@ def _display_scale(predicted: torch.Tensor, target: torch.Tensor,
                        torch.ones_like(scale))
 
 
-def _poses_in_dataset_world(prediction: Mapping, sequence: Mapping,
+def _poses_in_dataset_world(prediction: Mapping, sequence: Sequence[Mapping],
                             target: Mapping, point_scale: torch.Tensor):
     """Map the predicted first-camera gauge into the dataset world frame."""
 
@@ -106,7 +106,9 @@ def _poses_in_dataset_world(prediction: Mapping, sequence: Mapping,
     predicted[..., :3, 3] *= point_scale[:, None, None]
     predicted_relative = se3_inverse(predicted[:, 0])[:, None] @ predicted
 
-    world_target = sequence["camera_poses"].detach().float()
+    world_target = torch.stack(
+        [view["camera_pose"] for view in sequence], dim=1
+    ).detach().float()
     world_anchor = world_target[:, 0]
     anchor_rotation = world_anchor[:, :3, :3]
     anchor_translation = world_anchor[:, :3, 3]
@@ -180,7 +182,11 @@ def _labeled_grid(rows: list[tuple[str, list[Image.Image]]], frame_ids: list[int
 
 
 @torch.no_grad()
-def prepare_abot_diagnostics(prediction: Mapping, sequence: Mapping, criterion):
+def prepare_abot_diagnostics(
+    prediction: Mapping,
+    sequence: Sequence[Mapping],
+    criterion,
+):
     """Prepare GT and scale-aligned predictions in the loss coordinate system."""
 
     target = criterion.prepare_targets(sequence)
@@ -207,7 +213,7 @@ def prepare_abot_diagnostics(prediction: Mapping, sequence: Mapping, criterion):
 @torch.no_grad()
 def render_reconstruction_overview(
     prediction: Mapping,
-    sequence: Mapping,
+    sequence: Sequence[Mapping],
     criterion,
     *,
     batch_index: int = 0,
@@ -223,7 +229,7 @@ def render_reconstruction_overview(
     if diagnostics is None:
         diagnostics = prepare_abot_diagnostics(prediction, sequence, criterion)
     target = diagnostics["target"]
-    indices = _frame_indices(sequence["imgs"].shape[1], num_frames)
+    indices = _frame_indices(len(sequence), num_frames)
     valid = target["valid_masks"][batch_index]
     pred_depth = diagnostics["aligned_points"][batch_index, ..., 2]
     gt_depth = target["local_points"][batch_index, ..., 2]
@@ -232,7 +238,9 @@ def render_reconstruction_overview(
     if confidence is not None:
         confidence = confidence.detach().float().sigmoid()[batch_index, ..., 0]
 
-    rgb_panels = [_rgb_panel(sequence["imgs"][batch_index, frame]) for frame in indices]
+    rgb_panels = [
+        _rgb_panel(sequence[frame]["img"][batch_index]) for frame in indices
+    ]
     depth_ranges = [
         _shared_range(pred_depth[frame], gt_depth[frame], valid[frame])
         for frame in indices
@@ -255,7 +263,7 @@ def render_reconstruction_overview(
         for frame in indices
     ]
     valid_panels = [_gray_panel(valid[frame].float()) for frame in indices]
-    height, width = sequence["imgs"].shape[-2:]
+    height, width = sequence[0]["img"].shape[-2:]
     cell_height = max(round(height / width * cell_width), 1)
     pose_panels = _render_pose_panels(
         diagnostics,
@@ -426,7 +434,7 @@ class ABotReconTensorBoardVisualizer:
 
         prediction, sequence = output
         sample_count = min(int(self.config.get("num_samples", 1)),
-                           sequence["imgs"].shape[0])
+                           sequence[0]["img"].shape[0])
         diagnostics = prepare_abot_diagnostics(prediction, sequence, criterion)
         reconstruction = []
         for batch_index in range(sample_count):

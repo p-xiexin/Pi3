@@ -33,7 +33,7 @@ loss:
     confidence_weight: 0.0
     translation_weight: 100.0
     rotation_weight: 1.0
-    max_pair_gap: 12
+    max_pair_gap: 11
     gap_gamma: 0.5
     smooth_temporal_weight: 1.0
     confidence_error_threshold: 0.02
@@ -104,85 +104,43 @@ test:
 
 train_dataset:
   length: 10000000
-  # Keep only datasets with valid local paths in this mapping. Table 1 relative
-  # weights for the migrated datasets are TartanAir 672, ScanNet 246,
-  # Waymo 538 and BlendedMVS 247.
   weights:
     KITTIABotRecon: 100000
-  KITTIABotRecon:
-    _target_: pi3.models.abot_recon.dataset.KITTIABotReconDataset
-    raw_root: ???
-    depth_root: ???
-    index_file: null
-    cameras: [image_02]
-    splits: [train]
-    frame_step: 1
-    splat_radius: 0
+
+  wrapper: &train_wrapper
+    _target_: pi3.models.abot_recon.data_sampler.ABotReconSequenceWrapper
+    frame_num: ${train.image_num_range[1]}
+    min_source_frames: 12
+    min_source_ratio: 0.25
+    repeat_probability: 0.05
+    max_consecutive_repeat: 1
+
+  parent: &train_parent
+    _partial_: true
     z_far: 80
-    frame_num: 32
     shuffle: false
+    random_sample_thres: 0.0
     aug_crop: 0
     aug_focal: 0.9
-    transform: &abot_train_transform
+    transform:
       _partial_: true
       _target_: datasets.base.transforms.JitterJpegLossBlurring
     mode: train
-  # TartanAirABotRecon:
-  #   _target_: pi3.models.abot_recon.dataset.TartanAirABotReconDataset
-  #   data_root: null
-  #   max_distance: 24
-  #   z_far: 80
-  #   frame_num: 32
-  #   shuffle: false
-  #   random_sample_thres: 0.0
-  #   aug_crop: 0
-  #   aug_focal: 0.9
-  #   transform: *abot_train_transform
-  #   mode: train
-  # ScanNetABotRecon:
-  #   _target_: pi3.models.abot_recon.dataset.ScanNetABotReconDataset
-  #   data_root: null
-  #   max_distance: 240
-  #   z_far: 80
-  #   frame_num: 32
-  #   shuffle: false
-  #   random_sample_thres: 0.0
-  #   aug_crop: 0
-  #   aug_focal: 0.9
-  #   transform: *abot_train_transform
-  #   mode: train
-  # WaymoABotRecon:
-  #   _target_: pi3.models.abot_recon.dataset.WaymoABotReconDataset
-  #   data_root: null
-  #   index_file: null
-  #   camera_id: 0
-  #   frame_step: 1
-  #   depth_accumulate: 0
-  #   depth_cache_root: null
-  #   splat_radius: 0
-  #   z_far: 80
-  #   frame_num: 32
-  #   shuffle: false
-  #   random_sample_thres: 0.0
-  #   aug_crop: 0
-  #   aug_focal: 0.9
-  #   transform: *abot_train_transform
-  #   mode: train
-  # BlendedMVSABotRecon:
-  #   _target_: pi3.models.abot_recon.dataset.BlendedMVSABotReconDataset
-  #   data_root: null
-  #   index_file: null
-  #   pair_topk: 10
-  #   max_pair_hops: 2
-  #   min_depth_valid_ratio: 0.01
-  #   z_far: 0
-  #   frame_num: 32
-  #   shuffle: false
-  #   random_sample_thres: 0.0
-  #   aug_crop: 0
-  #   aug_focal: 0.9
-  #   transform: *abot_train_transform
-  #   mode: train
+
+  KITTIABotRecon:
+    <<: *train_wrapper
+    frame_step_range: [1, 6]
+    dataset_label: KITTIABotRecon
+    dataset:
+      <<: *train_parent
+      _target_: datasets.kitti_dataset.KITTIPi3XDataset
+      raw_root: ???
+      depth_root: ???
+      index_file: null
+      cameras: [image_02]
+      splits: [train]
+      frame_step: 1
+      splat_radius: 0
 
 train_dataloader:
   drop_last: true
@@ -191,25 +149,42 @@ train_dataloader:
 test_dataset:
   weights:
     KITTIABotRecon: 2000
-  KITTIABotRecon:
-    _target_: pi3.models.abot_recon.dataset.KITTIABotReconDataset
-    raw_root: ${train_dataset.KITTIABotRecon.raw_root}
-    depth_root: ${train_dataset.KITTIABotRecon.depth_root}
-    index_file: ${train_dataset.KITTIABotRecon.index_file}
-    cameras: [image_02]
-    splits: [val]
-    frame_step: 1
-    splat_radius: 0
+
+  wrapper: &test_wrapper
+    _target_: pi3.models.abot_recon.data_sampler.ABotReconSequenceWrapper
+    frame_num: ${test.image_num_range[1]}
+    frame_step_range: [1, 1]
+    min_source_frames: 12
+    min_source_ratio: 0.25
+    repeat_probability: 0.0
+    max_consecutive_repeat: 1
+    resolution: ${train.resolution}
+
+  parent: &test_parent
+    _partial_: true
     z_far: 80
-    frame_num: 8
     shuffle: false
+    random_sample_thres: 0.0
     aug_crop: 0
     aug_focal: 1.0
-    resolution: [[504, 280]]
-    transform: &abot_test_transform
+    transform:
       _partial_: true
       _target_: datasets.base.transforms.ImgToTensor
     mode: test
+
+  KITTIABotRecon:
+    <<: *test_wrapper
+    dataset_label: KITTIABotRecon
+    dataset:
+      <<: *test_parent
+      _target_: datasets.kitti_dataset.KITTIPi3XDataset
+      raw_root: ${train_dataset.KITTIABotRecon.dataset.raw_root}
+      depth_root: ${train_dataset.KITTIABotRecon.dataset.depth_root}
+      index_file: ${train_dataset.KITTIABotRecon.dataset.index_file}
+      cameras: [image_02]
+      splits: [val]
+      frame_step: 1
+      splat_radius: 0
 
 test_dataloader:
   drop_last: false
@@ -224,18 +199,7 @@ abot_recon:
     cell_width: 160
     relative_error_max: 0.2
     pose_camera_scale: 0.14
-    # evo uses the XZ trajectory plane for KITTI. Embed it horizontally in 3D.
     pose_plot_mode: xz
-
-data_viz:
-  dataset_name: KITTIABotRecon
-  output_dir: ${work_dir}/outputs/abot_recon_dataset_viz
-  sample_index: 0
-  num_samples: 1
-  frame_num: 8
-  cell_width: 240
-  max_frames: 8
-  show: false
 
 log:
   output_dir: ${work_dir}/outputs/${name}

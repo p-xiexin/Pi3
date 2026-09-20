@@ -1,0 +1,221 @@
+# ABot-Recon multi-dataset fragment. Copy train_dataset and test_dataset into
+# the stage config, then keep only datasets with valid local paths in weights.
+
+train_dataset:
+  length: 10000000
+  weights:
+    TartanAir: 672
+    ScanNet: 246
+    Waymo: 538
+    ARKitScenes: 134
+    ASE: 269
+    Hypersim: 627
+    # BlendedMVS: 247
+    # KITTIRaw: 100
+    # NuScenes: 100
+    # Sintel: 100
+    # TUMRGBD: 50
+    # Redwood: 50
+    # ETH3D: 50
+
+  wrapper: &train_wrapper
+    _target_: pi3.models.abot_recon.data_sampler.ABotReconSequenceWrapper
+    frame_num: ${train.image_num_range[1]}
+    min_source_frames: 12
+    min_source_ratio: 0.25
+    repeat_probability: 0.05
+    max_consecutive_repeat: 1
+
+  parent: &train_parent
+    _partial_: true
+    z_far: 80
+    shuffle: false
+    random_sample_thres: 0.0
+    aug_crop: 0
+    aug_focal: 0.9
+    transform:
+      _partial_: true
+      _target_: datasets.base.transforms.JitterJpegLossBlurring
+    mode: train
+
+  TartanAir:
+    <<: *train_wrapper
+    frame_step_range: [1, 1]
+    sort_views: true
+    dataset_label: TartanAirABotRecon
+    dataset:
+      <<: *train_parent
+      _target_: datasets.tartanair_dataset.TarTanAirDataset
+      data_root: /path/to/TartanAir
+      max_distance: 24
+
+  ScanNet:
+    <<: *train_wrapper
+    frame_step_range: [1, 1]
+    sort_views: true
+    dataset_label: ScanNetABotRecon
+    dataset:
+      <<: *train_parent
+      _target_: datasets.scannet_dataset.ScannetDataset
+      data_root: /path/to/scannet
+      max_distance: 240
+
+  Waymo:
+    <<: *train_wrapper
+    frame_step_range: [1, 8]
+    dataset_label: WaymoABotRecon
+    dataset:
+      <<: *train_parent
+      _target_: datasets.waymo_processed_dataset.WaymoPi3XDataset
+      data_root: /path/to/waymo_processed
+      index_file: /path/to/waymo_index.npy
+      camera_id: 0
+      frame_step: 1
+      depth_accumulate: 0
+      depth_cache_root: null
+      splat_radius: 0
+
+  ARKitScenes:
+    <<: *train_wrapper
+    frame_step_range: [1, 1]
+    dataset:
+      <<: *train_parent
+      _target_: datasets.arkit_dataset.ARKitScenesPi3XDataset
+      data_root: /path/to/arkitscenes
+      index_file: /path/to/arkitscenes_index.npy
+      frame_step: 1
+
+  ASE:
+    <<: *train_wrapper
+    frame_step_range: [1, 2]
+    dataset:
+      <<: *train_parent
+      _target_: datasets.ase_dataset.AriaSyntheticEnvironmentsPi3XDataset
+      data_root: /path/to/ASE
+      index_file: /path/to/ase_index.npy
+      frame_step: 1
+
+  Hypersim:
+    <<: *train_wrapper
+    frame_step_range: [1, 1]
+    dataset:
+      <<: *train_parent
+      _target_: datasets.hypersim_dataset.HypersimDataset
+      data_root: /path/to/hypersim
+      index_file: /path/to/hypersim_index.npy
+      cameras: [cam_00]
+      frame_step: 1
+
+  BlendedMVS:
+    <<: *train_wrapper
+    frame_step_range: [1, 1]
+    dataset_label: BlendedMVSABotRecon
+    dataset:
+      <<: *train_parent
+      _target_: datasets.blendmvs_dataset.BlendedMVSPi3XDataset
+      data_root: /path/to/blendedmvs
+      index_file: /path/to/blendedmvs_index.npy
+      pair_topk: 10
+      max_pair_hops: 2
+      min_depth_valid_ratio: 0.01
+      z_far: 0
+
+  KITTIRaw:
+    <<: *train_wrapper
+    frame_step_range: [2, 6]
+    dataset_label: KITTIABotRecon
+    dataset:
+      <<: *train_parent
+      _target_: datasets.kitti_dataset.KITTIPi3XDataset
+      raw_root: /path/to/kitti_raw
+      depth_root: /path/to/kitti_depth
+      index_file: /path/to/kitti_index.npy
+      cameras: [image_02]
+      splits: [train]
+      frame_step: 1
+      splat_radius: 0
+
+  NuScenes:
+    <<: *train_wrapper
+    frame_step_range: [1, 1]
+    dataset:
+      <<: *train_parent
+      _target_: datasets.nuscenes_dataset.NuScenesPi3XDataset
+      data_root: /path/to/nuscenes
+      index_file: /path/to/nuscenes_index.npy
+      version: v1.0-trainval
+      cameras: [CAM_FRONT]
+      frame_step: 1
+      map_context: 4
+      splat_radius: 1
+
+  Sintel:
+    <<: *train_wrapper
+    frame_step_range: [1, 1]
+    dataset:
+      <<: *train_parent
+      _target_: datasets.sintel_dataset.SintelDepthDataset
+      data_root: /path/to/sintel
+      index_file: /path/to/sintel_index.npy
+      frame_step: 1
+      render_pass: final
+
+  TUMRGBD:
+    <<: *train_wrapper
+    frame_step_range: [1, 1]
+    dataset:
+      <<: *train_parent
+      _target_: datasets.tum_rgbd_dataset.TUMRGBDPi3XDataset
+      data_root: /path/to/tum_rgbd
+      index_file: /path/to/tum_rgbd_index.npy
+      frame_step: 1
+
+  Redwood:
+    <<: *train_wrapper
+    frame_step_range: [1, 1]
+    dataset:
+      <<: *train_parent
+      _target_: datasets.redwood_rgbd_dataset.RedwoodRGBDDataset
+      data_root: /path/to/redwood
+      index_file: /path/to/redwood_index.npy
+      frame_step: 1
+
+  ETH3D:
+    <<: *train_wrapper
+    frame_step_range: [1, 1]
+    dataset:
+      <<: *train_parent
+      _target_: datasets.eth3d_slam_dataset.ETH3DSLAMDataset
+      data_root: /path/to/eth3d_slam
+      index_file: /path/to/eth3d_slam_index.npy
+      frame_step: 1
+
+test_dataset:
+  weights:
+    ScanNet: 2000
+
+  ScanNet:
+    _target_: pi3.models.abot_recon.data_sampler.ABotReconSequenceWrapper
+    frame_num: ${test.image_num_range[1]}
+    frame_step_range: [1, 1]
+    min_source_frames: 12
+    min_source_ratio: 0.25
+    repeat_probability: 0.0
+    max_consecutive_repeat: 1
+    sort_views: true
+    dataset_label: ScanNetABotRecon
+    resolution: ${train.resolution}
+    dataset:
+      _target_: datasets.scannet_dataset.ScannetDataset
+      _partial_: true
+      data_root: /path/to/scannet
+      max_distance: 240
+      z_far: 80
+      shuffle: false
+      random_sample_thres: 0.0
+      aug_crop: 0
+      aug_focal: 1.0
+      transform:
+        _partial_: true
+        _target_: datasets.base.transforms.ImgToTensor
+      mode: test

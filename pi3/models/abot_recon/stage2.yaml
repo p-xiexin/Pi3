@@ -42,12 +42,3 @@ test:
   max_img_per_gpu: 128
   # Keep long-horizon validation bounded while evaluating complete 128-frame clips.
   iters_per_test: 8
-
-train_dataset:
-  KITTIABotRecon:
-    min_sequence_frames: 128
-
-test_dataset:
-  KITTIABotRecon:
-    frame_num: 128
-    min_sequence_frames: 128
