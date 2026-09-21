@@ -14,8 +14,39 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
   --num_processes 8 eval/dataset_eval.py --config-name valid
 ```
 
-Set both checkpoint paths and dataset paths in `valid.yaml`, or use Hydra
-command-line overrides. Delete or comment out unused entries under `datasets`.
+Choose the backbone from the `model` Hydra group. `model=pi3` loads a standard
+Pi3 checkpoint through `model.backbone_checkpoint`. `model=pi3x` defaults to
+the released inference class and loads its checkpoint through
+`model.backbone.ckpt`. A checkpoint produced with `pi3x_training.py` selects
+that existing class by overriding `_target_`. For example:
+
+```bash
+# Pi3
+accelerate launch --config_file configs/accelerate/ddp.yaml \
+  --num_processes 8 eval/dataset_eval.py --config-name valid \
+  model=pi3 \
+  model.backbone_checkpoint=/path/to/pi3.safetensors \
+  model.matching_checkpoint=/path/to/pi3_glob3r.bin
+
+# A checkpoint trained with pi3x_training.py
+accelerate launch --config_file configs/accelerate/ddp.yaml \
+  --num_processes 8 eval/dataset_eval.py --config-name valid \
+  model=pi3x \
+  model.backbone._target_=pi3.models.pi3x_training.Pi3X \
+  +model.backbone.checkpoint_strategy=null \
+  model.backbone.ckpt=/path/to/pi3x_training.bin \
+  model.matching_checkpoint=/path/to/pi3x_glob3r.bin
+```
+
+Evaluation enforces `model.with_prior=false`. Pi3 and Pi3X therefore receive
+the same RGB-only input, and the training Pi3X class cannot sample stochastic
+conditioning masks while in evaluation mode. Set the dataset paths in
+`valid.yaml`, or use Hydra command-line overrides. Delete or comment out unused
+entries under `datasets`.
+
+Evaluation-only model assembly lives in `eval/model/glob3r.py`. It reuses the
+existing Pi3, Pi3X, and Glob3R modules and does not alter or depend on the
+`local_opt` model wrapper.
 Each sequence is owned by one rank. Every completed window atomically writes a
 PNG and a matching `chunk_*.json` commit, appends `metrics.csv` and
 `timings.csv`, and updates `progress.json` plus `summary.json`. A matching rerun
@@ -37,10 +68,12 @@ imbalance caused by round-robin sequence assignment. Ranks finish independently;
 the entry point has no final distributed barrier or metric gather. Per-sequence
 files are authoritative, and the console summary is local to each rank.
 
-`timings.csv` records synchronized wall time for the Pi3 backbone, Pi3 point and
-depth-confidence decoding, Glob3R matching, and their combined network path.
-Dataset loading, ground-truth construction, loss computation, and rendering are
-outside the reported network time.
+`timings.csv` records synchronized wall time for the Pi3-family backbone,
+geometry heads, Glob3R matching, and their combined network path. Pi3X geometry
+uses its existing `forward_head`, including point, confidence, camera, and
+metric heads; the legacy CSV column remains
+`pi3_point_depth_decode_seconds`. Dataset loading, ground-truth construction,
+loss computation, and rendering are outside the reported network time.
 
 Window tensors live inside one computation scope. After the image and metrics
 are committed, CPU objects are collected and the CUDA allocator cache is

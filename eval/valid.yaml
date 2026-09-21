@@ -1,6 +1,6 @@
-model:
-  backbone_checkpoint: ???
-  matching_checkpoint: ???
+defaults:
+  - model: pi3
+  - _self_
 
 inference:
   mixed_precision: bf16

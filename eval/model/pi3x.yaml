@@ -1,0 +1,8 @@
+backbone:
+  _target_: pi3.models.pi3x.Pi3X
+  ckpt: ???
+  use_multimodal: true
+
+backbone_checkpoint: null
+matching_checkpoint: ???
+with_prior: false

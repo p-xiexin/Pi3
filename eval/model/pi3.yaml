@@ -1,0 +1,8 @@
+backbone:
+  _target_: pi3.models.pi3.Pi3
+  pos_type: rope100
+  decoder_size: large
+
+backbone_checkpoint: ???
+matching_checkpoint: ???
+with_prior: false

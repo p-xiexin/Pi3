@@ -31,8 +31,8 @@ from eval.evaluation_utils import (
     shard_weighted_items,
 )
 from eval.artifact_store import WindowArtifactStore
+from eval.model import load_eval_glob3r
 from eval.window_adapters import create_window_adapter
-from local_opt.inference import load_glob3r_for_sfm
 from pi3.models.glob3r.geometry import build_ground_truth_warp
 
 
@@ -151,29 +151,6 @@ def _synchronize(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
-def _decode_point_depth(model, geometry_tokens, positions, frame_count, height, width):
-    """Decode the Pi3 local point map and its confidence without camera poses."""
-
-    backbone = model.backbone
-    batch = geometry_tokens.shape[0] // frame_count
-    with torch.amp.autocast(device_type=geometry_tokens.device.type, enabled=False):
-        point_hidden = backbone.point_decoder(geometry_tokens, xpos=positions).float()
-        point_output = backbone.point_head(
-            [point_hidden[:, backbone.patch_start_idx :]], (height, width)
-        ).reshape(batch, frame_count, height, width, -1)
-        xy, depth = point_output.split((2, 1), dim=-1)
-        depth = depth.exp()
-        local_points = torch.cat((xy * depth, depth), dim=-1)
-
-        confidence_hidden = backbone.conf_decoder(
-            geometry_tokens, xpos=positions
-        ).float()
-        confidence = backbone.conf_head(
-            [confidence_hidden[:, backbone.patch_start_idx :]], (height, width)
-        ).reshape(batch, frame_count, height, width, -1)
-    return {"local_points": local_points, "conf": confidence}
-
-
 def _timed_network_forward(model, images, accelerator):
     """Run the three requested network stages with synchronized wall timing."""
 
@@ -192,8 +169,12 @@ def _timed_network_forward(model, images, accelerator):
         pi3_backbone_seconds = time.perf_counter() - stage_start
 
         stage_start = time.perf_counter()
-        geometry = _decode_point_depth(
-            model, geometry_tokens, positions, frame_count, height, width
+        geometry = model._predict_geometry(
+            geometry_tokens,
+            positions,
+            frame_count,
+            height,
+            width,
         )
         _synchronize(device)
         pi3_point_depth_decode_seconds = time.perf_counter() - stage_start
@@ -238,12 +219,29 @@ def _path_signature(path_value) -> dict:
     }
 
 
+def _backbone_checkpoint_config(cfg: DictConfig) -> tuple[object | None, object]:
+    external = OmegaConf.select(cfg, "model.backbone_checkpoint", default=None)
+    nested = [
+        OmegaConf.select(cfg, f"model.backbone.{name}", default=None)
+        for name in ("ckpt", "ckpts")
+    ]
+    configured = [value for value in (external, *nested) if value is not None]
+    if len(configured) != 1:
+        raise ValueError(
+            "configure exactly one backbone checkpoint through "
+            "model.backbone_checkpoint, model.backbone.ckpt, or "
+            "model.backbone.ckpts"
+        )
+    return external, configured[0]
+
+
 def _evaluation_fingerprint(
     cfg: DictConfig,
     task: SequenceTask,
     resolved_config: str,
     windows,
 ) -> str:
+    _external_checkpoint, backbone_checkpoint = _backbone_checkpoint_config(cfg)
     payload = {
         "resolved_config": resolved_config,
         "dataset": task.dataset_name,
@@ -251,7 +249,7 @@ def _evaluation_fingerprint(
         "sequence_index": task.sequence_index,
         "frame_count": task.frame_count,
         "windows": [list(window.positions) for window in windows],
-        "backbone_checkpoint": _path_signature(cfg.model.backbone_checkpoint),
+        "backbone_checkpoint": _path_signature(backbone_checkpoint),
         "matching_checkpoint": _path_signature(cfg.model.matching_checkpoint),
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -403,6 +401,7 @@ def _evaluate_sequence(
         / f"{task.sequence_index:06d}_{_safe_name(task.sequence_id)}"
     )
     adapter = adapter or create_window_adapter(dataset)
+    _external_checkpoint, backbone_checkpoint = _backbone_checkpoint_config(cfg)
     metadata = {
         "dataset": task.dataset_name,
         "sequence": task.sequence_id,
@@ -415,7 +414,9 @@ def _evaluate_sequence(
         "chunk_size": chunk_size,
         "overlap": overlap,
         "stride": stride,
-        "backbone_checkpoint": str(cfg.model.backbone_checkpoint),
+        "backbone_class": str(cfg.model.backbone._target_),
+        "backbone_checkpoint": str(backbone_checkpoint),
+        "with_prior": bool(cfg.model.with_prior),
         "matching_checkpoint": str(cfg.model.matching_checkpoint),
     }
     fingerprint = _evaluation_fingerprint(cfg, task, resolved_config, windows)
@@ -630,9 +631,19 @@ def main(cfg: DictConfig) -> None:
 
     model = None
     if local_tasks:
-        model = load_glob3r_for_sfm(
-            cfg.model.backbone_checkpoint,
-            cfg.model.matching_checkpoint,
+        backbone_checkpoint, _checkpoint_source = _backbone_checkpoint_config(cfg)
+        with_prior = bool(cfg.model.with_prior)
+        if with_prior:
+            raise ValueError(
+                "dataset evaluation compares RGB-only backbones and requires "
+                "model.with_prior=false"
+            )
+        backbone = hydra.utils.instantiate(cfg.model.backbone)
+        model = load_eval_glob3r(
+            backbone=backbone,
+            backbone_checkpoint=backbone_checkpoint,
+            matching_checkpoint=cfg.model.matching_checkpoint,
+            with_prior=with_prior,
             device=accelerator.device,
         )
 
