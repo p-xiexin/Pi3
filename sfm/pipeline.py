@@ -282,6 +282,7 @@ class GraphBackend:
         save_ply(
             self.output_dir / "sparse_tracks.ply",
             result["sparse_points"],
+            result["sparse_colors"],
             scalar_fields={
                 "frame_id": result["sparse_frame_ids"],
                 "obs_cnt": result["sparse_obs_cnt"],

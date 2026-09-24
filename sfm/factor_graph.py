@@ -39,6 +39,7 @@ class FactorGraph:
         self.edges = []
         self.edge_lookup = {}
         self.pi3_edge_keys = set()
+        self.frame_chunk_ids = {}
         self.first_sliding_root_frame_id = None
         self.first_sliding_midpoint_frame_id = None
 
@@ -173,6 +174,10 @@ class FactorGraph:
                     )
             resolved_parts.append((part, point_ids))
         frame_ids = packet["frame_ids"].tolist()
+        if packet_kind == "sliding":
+            chunk_id = int(frame_ids[0])
+            for frame_id in frame_ids:
+                self.frame_chunk_ids.setdefault(int(frame_id), chunk_id)
         if (
             packet_kind == "sliding"
             and self.first_sliding_midpoint_frame_id is None
