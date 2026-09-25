@@ -44,6 +44,11 @@ class ABotReconTrainer(Pi3Trainer):
             self.train_loss,
             self.test_loss,
         )
+        accumulation = max(
+            int(self.cfg.train.gradient_accumulation_steps), 1
+        )
+        self._train_micro_step = int(self.initial_global_step)
+        self._train_update_step = self._train_micro_step // accumulation
 
     def auto_resume(self):
         """Create and register EMA before Accelerate restores checkpoint state."""
@@ -132,9 +137,40 @@ class ABotReconTrainer(Pi3Trainer):
         return [prediction, batch]
 
     def calculate_loss(self, output, batch, mode="train"):
+        if mode == "train":
+            self._train_micro_step += 1
+            accumulation = max(
+                int(self.cfg.train.gradient_accumulation_steps), 1
+            )
+            self._train_update_step = (
+                self._train_micro_step + accumulation - 1
+            ) // accumulation
         result = super().calculate_loss(output, batch, mode)
+        if mode == "train" and result.loss.item() > self.cfg.train.clip_loss:
+            keys = (
+                "loss", "local_pts_loss", "normal_loss", "pose_loss",
+                "trans_loss", "rot_loss", "smooth_loss", "point_scale",
+            )
+            details = ", ".join(
+                f"{key}={result[key].item():.6g}" for key in keys
+            )
+            self.log_info(
+                f"[ABot loss clip] step={self._train_update_step}, {details}"
+            )
         self.visualizer.log(self.accelerator, output, mode)
         return result
+
+    def log_all(self, output, step, prefix=""):
+        if prefix == "train":
+            accumulation = max(
+                int(self.cfg.train.gradient_accumulation_steps), 1
+            )
+            epoch, update = divmod(int(step), self.iters_per_epoch)
+            updates_per_epoch = (
+                self.iters_per_epoch + accumulation - 1
+            ) // accumulation
+            step = epoch * updates_per_epoch + update
+        return super().log_all(output, step, prefix)
 
     def validate(self, epoch):
         self.visualizer.begin_validation(epoch)
