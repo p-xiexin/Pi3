@@ -176,9 +176,11 @@ class Glob3R(nn.Module):
         return {
             "match_similarity": matching.similarity,
             "coarse_warp": matching.coarse_warp,
+            "normalized_coarse_warp": matching.normalized_coarse_warp,
             "coarse_match_confidence": matching.coarse_confidence,
             "coarse_match_confidence_logits": matching.coarse_confidence_logits,
             "warp_stages": matching.warp_stages,
+            "normalized_warp_stages": matching.normalized_warp_stages,
             "match_confidence_stages": matching.confidence_stages,
             "match_confidence_logits_stages": matching.confidence_logits_stages,
             "target_indices": matching.target_indices,

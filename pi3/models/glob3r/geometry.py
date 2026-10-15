@@ -24,6 +24,22 @@ def _pixel_grid(batch: int, height: int, width: int, device, dtype) -> torch.Ten
     return homogeneous.unsqueeze(0).expand(batch, -1, -1, -1)
 
 
+def normalize_warp(warp: torch.Tensor, image_size: tuple[int, int]) -> torch.Tensor:
+    """Convert zero-based pixel coordinates to ``align_corners=False`` coordinates."""
+
+    height, width = image_size
+    scale = warp.new_tensor([width, height])[None, None, :, None, None]
+    return 2.0 * (warp + 0.5) / scale - 1.0
+
+
+def denormalize_warp(warp: torch.Tensor, image_size: tuple[int, int]) -> torch.Tensor:
+    """Convert ``align_corners=False`` coordinates to zero-based pixels."""
+
+    height, width = image_size
+    scale = warp.new_tensor([width, height])[None, None, :, None, None]
+    return (warp + 1.0) * 0.5 * scale - 0.5
+
+
 def _inside_image(xy: torch.Tensor, height: int, width: int) -> torch.Tensor:
     return (
         (xy[..., 0] >= 0)

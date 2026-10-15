@@ -8,7 +8,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .geometry import build_ground_truth_warp, relative_camera_transform
+from .geometry import build_ground_truth_warp, normalize_warp, relative_camera_transform
 
 
 def _resize_scalar_map(value: torch.Tensor, size: Tuple[int, int], mode: str) -> torch.Tensor:
@@ -47,8 +47,12 @@ def patch_nll_targets(
     batch, targets, height, width = ground_truth_warp.shape[:4]
     warp = _resize_warp(ground_truth_warp, (patch_height, patch_width))
     valid = _resize_scalar_map(positive, (patch_height, patch_width), "nearest").bool()
-    target_x = (warp[:, :, 0] / max(width - 1, 1) * (patch_width - 1)).round().long()
-    target_y = (warp[:, :, 1] / max(height - 1, 1) * (patch_height - 1)).round().long()
+    # target_x = (warp[:, :, 0] / max(width - 1, 1) * (patch_width - 1)).round().long()
+    # target_y = (warp[:, :, 1] / max(height - 1, 1) * (patch_height - 1)).round().long()
+    patch_size_x = width / patch_width
+    patch_size_y = height / patch_height
+    target_x = ((warp[:, :, 0] + patch_size_x / 2) / patch_size_x).round().long()
+    target_y = ((warp[:, :, 1] + patch_size_y / 2) / patch_size_y).round().long()
     inside = (
         (target_x >= 0) & (target_x < patch_width) & (target_y >= 0) & (target_y < patch_height)
     )
@@ -356,7 +360,10 @@ class Glob3RMatchingLoss(nn.Module):
             raise ValueError("similarity matrix does not match the Pi3X patch grid")
         nll = auxiliary_nll_loss(similarity_logits, labels)
 
-        warp_predictions = [predictions["coarse_warp"], *predictions.get("warp_stages", [])]
+        warp_predictions = [
+            predictions["normalized_coarse_warp"],
+            *predictions.get("normalized_warp_stages", []),
+        ]
         confidence_logits_predictions = [
             predictions["coarse_match_confidence_logits"],
             *predictions.get("match_confidence_logits_stages", []),
@@ -371,6 +378,9 @@ class Glob3RMatchingLoss(nn.Module):
         ):
             size = predicted_warp.shape[-2:]
             ground_truth_warp = _resize_warp(supervision.warp, size)
+            ground_truth_warp = normalize_warp(
+                ground_truth_warp, (image_h, image_w)
+            )
             positive = _resize_scalar_map(supervision.confidence, size, "nearest").bool()
             mask = _resize_scalar_map(supervision.mask, size, "nearest").bool()
             # Appendix B: warp regression is evaluated only where y=1 and m=1.

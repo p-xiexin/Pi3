@@ -19,6 +19,8 @@ from torch import nn
 import torch.nn.functional as F
 from torchvision.models import vgg19_bn
 
+from .geometry import denormalize_warp
+
 
 @dataclass
 class GeometryPrediction:
@@ -234,10 +236,9 @@ class DPTMatchingHead(nn.Module):
             prediction = self.output((fused + pair_map).float())
 
         # Glob3R Eq. (20): (W^(a->B), p^(a->B)) = DPT_match(F^(a->B), E).
-        raw_warp, confidence_logits = prediction[:, :2], prediction[:, 2:3]
-        raw_warp = raw_warp.sigmoid()
-        scale = raw_warp.new_tensor([image_width - 1, image_height - 1]).view(1, 2, 1, 1)
-        warp = raw_warp * scale
+        # The DPT warp channels are regressed directly in normalized coordinates,
+        # matching RoMaV2. Confidence remains an unconstrained BCE logit.
+        warp, confidence_logits = prediction[:, :2], prediction[:, 2:3]
         confidence = confidence_logits.sigmoid()
         stride4_height, stride4_width = target_sizes[0]
         # Glob3R Eq. (21): W:[B,N-1,2,H/4,W/4], p:[B,N-1,1,H/4,W/4].
@@ -388,16 +389,6 @@ class WarpRefinement(nn.Module):
         )
         return torch.stack((x, y), dim=-1).unsqueeze(0).expand(batch, -1, -1, -1)
 
-    @staticmethod
-    def _normalize_warp(warp: torch.Tensor, image_height: int, image_width: int) -> torch.Tensor:
-        scale = warp.new_tensor([image_width, image_height]).view(1, 2, 1, 1)
-        return 2.0 * (warp + 0.5) / scale - 1.0
-
-    @staticmethod
-    def _pixel_warp(warp: torch.Tensor, image_height: int, image_width: int) -> torch.Tensor:
-        scale = warp.new_tensor([image_width, image_height]).view(1, 2, 1, 1)
-        return (warp + 1.0) * 0.5 * scale - 0.5
-
     def forward(
         self,
         coarse_warp: torch.Tensor,
@@ -408,14 +399,9 @@ class WarpRefinement(nn.Module):
         image_height: int,
         image_width: int,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
-        # B: batch, T: target views, N: all views, C_s/H_s/W_s: features at stride s.
-        # coarse_warp: [B,T,2,H/4,W/4] -> [B*T,2,H/4,W/4], treating each
-        # reference-target pair as an independent sample for 2D refinement.
+        # Warp values stay normalized while only their reference grid is resized.
         batch, targets = coarse_warp.shape[:2]
         warp = coarse_warp.reshape(batch * targets, 2, *coarse_warp.shape[-2:])
-        # RoMaV2 uses pixel-center normalized [-1,1] coordinates. Public
-        # Glob3R outputs remain zero-based full-image pixel coordinates.
-        warp = self._normalize_warp(warp, image_height, image_width)
         # coarse_confidence_logits: [B,T,1,H/4,W/4] -> [B*T,1,H/4,W/4].
         confidence_logits = coarse_confidence_logits.reshape(
             batch * targets, 1, *coarse_confidence_logits.shape[-2:]
@@ -491,9 +477,7 @@ class WarpRefinement(nn.Module):
             ).view(1, 2, 1, 1)
             warp = warp + delta_warp / residual_scale
             confidence_logits = confidence_logits + delta_confidence
-            pixel_warp = self._pixel_warp(warp, image_height, image_width)
-            # Restore the target-view axis for public outputs at each stride.
-            warp_stages.append(pixel_warp.reshape(batch, targets, 2, feature_height, feature_width))
+            warp_stages.append(warp.reshape(batch, targets, 2, feature_height, feature_width))
             stage_logits = confidence_logits.reshape(
                 batch, targets, 1, feature_height, feature_width
             )
@@ -512,6 +496,8 @@ class MatchingOutput:
     confidence_stages: List[torch.Tensor]
     confidence_logits_stages: List[torch.Tensor]
     target_indices: List[int]
+    normalized_coarse_warp: torch.Tensor
+    normalized_warp_stages: List[torch.Tensor]
 
 
 class Glob3RMatchingHead(nn.Module):
@@ -562,7 +548,7 @@ class Glob3RMatchingHead(nn.Module):
         similarity, embeddings, reference_tokens, target_indices = self.match_embedding(
             match_tokens, patch_height, patch_width, reference_index
         )
-        coarse_warp, coarse_confidence, coarse_confidence_logits = self.dpt_match(
+        normalized_coarse_warp, coarse_confidence, coarse_confidence_logits = self.dpt_match(
             reference_tokens,
             embeddings,
             encoder_features,
@@ -578,7 +564,7 @@ class Glob3RMatchingHead(nn.Module):
         if self.refinement_active:
             fine_features = self.fine_features(images)
             warp_stages, confidence_stages, confidence_logits_stages = self.refinement(
-                coarse_warp,
+                normalized_coarse_warp,
                 coarse_confidence_logits,
                 fine_features,
                 target_indices,
@@ -586,6 +572,16 @@ class Glob3RMatchingHead(nn.Module):
                 height,
                 width,
             )
+        normalized_warp_stages = warp_stages
+
+        # Training and refinement stay in RoMaV2's normalized coordinates.
+        # Pixel coordinates are materialized once at the public output boundary.
+        image_size = (height, width)
+        coarse_warp = denormalize_warp(normalized_coarse_warp, image_size)
+        warp_stages = [
+            denormalize_warp(warp, image_size) for warp in normalized_warp_stages
+        ]
+
         # Glob3R Eq. (2): W_(a->B),p_(a->B) = DPT_match(Dec_match(H),a).
         return MatchingOutput(
             similarity=similarity,
@@ -596,6 +592,8 @@ class Glob3RMatchingHead(nn.Module):
             confidence_stages=confidence_stages,
             confidence_logits_stages=confidence_logits_stages,
             target_indices=target_indices,
+            normalized_coarse_warp=normalized_coarse_warp,
+            normalized_warp_stages=normalized_warp_stages,
         )
 
 
