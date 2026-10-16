@@ -1,0 +1,123 @@
+name: abot_match_coarse
+cpu: false
+
+log:
+  output_dir: ${hydra:runtime.output_dir}
+  ckpt_dir: ${log.output_dir}/ckpts
+  use_tensorboard: true
+  summary_interval: 10
+  ckpt_interval: 10
+
+glob3r:
+  backbone_checkpoint: ???
+  matching_checkpoint: null
+  max_pairs: 4
+  visualization:
+    enabled: true
+    interval_steps: 500
+    num_samples: 1
+    num_frames: 8
+    confidence_threshold: 0.5
+    cell_width: 160
+    epe_max: 10.0
+
+train:
+  image_num_range: [32, 128]
+  resolution: [[504, 280]]
+  clip_lengths: [32, 64, 128]
+  clip_probabilities: [0.5, 0.25, 0.25]
+  num_epoch: 80
+  iters_per_epoch: 800
+  gradient_accumulation_steps: 2
+  num_workers: 4
+  print_freq: 40
+  base_seed: 666
+  model_dtype: bf16
+  clip_grad: 1.0
+  seed: 42
+  resume: null
+  optimizer:
+    type: AdamW
+    lr: 1.0e-4
+    weight_decay: 5.0e-2
+    betas: [0.9, 0.95]
+    filter_bias_and_bn: true
+  lr_scheduler:
+    type: CosineWithWarmupLR
+    total_steps: -1
+    warmup_steps: 2000
+    accumulation_steps: ${train.gradient_accumulation_steps}
+    min_factor: 0.0
+
+test:
+  image_num_range: [32, 32]
+  num_workers: 4
+  print_freq: 10
+  iters_per_test: 20
+
+train_dataset:
+  ScanNet:
+    _target_: pi3.models.abot_recon.data_sampler.ABotReconSequenceWrapper
+    frame_num: ${train.image_num_range[1]}
+    min_source_frames: 2
+    min_source_ratio: 1.0
+    repeat_probability: 0.0
+    max_consecutive_repeat: 1
+    frame_step_range: [1, 1]
+    sort_views: true
+    dataset_label: ScanNetABotRecon
+    resolution: ${train.resolution}
+    dataset:
+      _target_: datasets.scannet_dataset.ScannetDataset
+      _partial_: true
+      data_root: /path/to/scannet
+      max_distance: 240
+      z_far: 80
+      shuffle: false
+      random_sample_thres: 0.0
+      aug_crop: 0
+      aug_focal: 1.0
+      transform:
+        _target_: torchvision.transforms.ToTensor
+        _partial_: false
+      mode: train
+test_dataset:
+  ScanNet:
+    _target_: pi3.models.abot_recon.data_sampler.ABotReconSequenceWrapper
+    frame_num: ${test.image_num_range[1]}
+    frame_step_range: [1, 1]
+    min_source_frames: 2
+    min_source_ratio: 1.0
+    repeat_probability: 0.0
+    max_consecutive_repeat: 1
+    sort_views: true
+    dataset_label: ScanNetABotRecon
+    resolution: ${train.resolution}
+    dataset:
+      _target_: datasets.scannet_dataset.ScannetDataset
+      _partial_: true
+      data_root: /path/to/scannet
+      max_distance: 240
+      z_far: 80
+      shuffle: false
+      random_sample_thres: 0.0
+      aug_crop: 0
+      aug_focal: 1.0
+      transform:
+        _partial_: true
+        _target_: datasets.base.transforms.ImgToTensor
+      mode: test
+
+hydra:
+  job_logging:
+    formatters:
+      simple:
+        format: '[%(asctime)s][%(name)s][%(levelname)s] - %(message)s'
+    handlers:
+      file:
+        filename: ${log.output_dir}/train.log
+        delay: true
+  run:
+    dir: outputs/${name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: false

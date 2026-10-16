@@ -42,17 +42,21 @@ def patch_nll_targets(
     patch_height: int,
     patch_width: int,
 ) -> torch.Tensor:
-    """Build reference-row, target-column labels for corrected Eq. (31)."""
+    """Build patch NLL labels using the author's integer-center sampling."""
 
     batch, targets, height, width = ground_truth_warp.shape[:4]
-    warp = _resize_warp(ground_truth_warp, (patch_height, patch_width))
-    valid = _resize_scalar_map(positive, (patch_height, patch_width), "nearest").bool()
-    # target_x = (warp[:, :, 0] / max(width - 1, 1) * (patch_width - 1)).round().long()
-    # target_y = (warp[:, :, 1] / max(height - 1, 1) * (patch_height - 1)).round().long()
-    patch_size_x = width / patch_width
-    patch_size_y = height / patch_height
-    target_x = ((warp[:, :, 0] + patch_size_x / 2) / patch_size_x).round().long()
-    target_y = ((warp[:, :, 1] + patch_size_y / 2) / patch_size_y).round().long()
+    patch_size = 14
+    grid_y, grid_x = torch.meshgrid(
+        torch.arange(patch_height, device=ground_truth_warp.device) * patch_size + patch_size // 2,
+        torch.arange(patch_width, device=ground_truth_warp.device) * patch_size + patch_size // 2,
+        indexing="ij",
+    )
+    warp = ground_truth_warp[:, :, grid_y, grid_x].permute(0, 1, 4, 2, 3)
+    valid = positive[:, :, grid_y, grid_x] > 0.5
+    # The author takes normalized GT; retain this repository's pixel-center convention.
+    warp = normalize_warp(warp, (height, width))
+    target_x = ((warp[:, :, 0] + 1) / 2 * (patch_width - 1)).round().long()
+    target_y = ((warp[:, :, 1] + 1) / 2 * (patch_height - 1)).round().long()
     inside = (
         (target_x >= 0) & (target_x < patch_width) & (target_y >= 0) & (target_y < patch_height)
     )

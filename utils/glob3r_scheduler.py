@@ -9,8 +9,9 @@ class CosineWithWarmupLR(lr_scheduler.LambdaLR):
     """Linear warm-up followed by cosine decay.
 
     Appendix B specifies a 2K-iteration warm-up for both the 32K coarse and
-    refinement stages.  ``warmup_steps`` is expressed directly in optimizer
-    steps so gradient accumulation is handled by the existing trainer.
+    refinement stages. ``warmup_steps`` is expressed in optimizer updates;
+    scheduler calls made for accumulation micro-batches are mapped back to
+    those update units below.
     """
 
     def __init__(
@@ -24,16 +25,20 @@ class CosineWithWarmupLR(lr_scheduler.LambdaLR):
     ):
         if accumulation_steps < 1:
             raise ValueError("accumulation_steps must be positive")
-        # BaseTrainer supplies dataloader (micro-batch) steps, while Accelerate
-        # advances its wrapped scheduler only when the optimizer really steps.
+        # BaseTrainer advances the scheduler after every dataloader micro-batch.
+        # Convert that call index back to optimizer-update units so gradient
+        # accumulation does not compress the warm-up and cosine schedule.
         optimizer_steps = total_steps // accumulation_steps
         if not 0 <= warmup_steps < optimizer_steps:
             raise ValueError("warmup_steps must be smaller than optimizer steps")
 
         def schedule(step: int) -> float:
-            if step < warmup_steps:
-                return max(step, 1) / max(warmup_steps, 1)
-            progress = (step - warmup_steps) / max(optimizer_steps - warmup_steps, 1)
+            optimizer_step = step // accumulation_steps
+            if optimizer_step < warmup_steps:
+                return max(optimizer_step, 1) / max(warmup_steps, 1)
+            progress = (optimizer_step - warmup_steps) / max(
+                optimizer_steps - warmup_steps, 1
+            )
             cosine = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
             return min_factor + (1.0 - min_factor) * cosine
 
